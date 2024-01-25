@@ -4,12 +4,11 @@ on:
     branches:
       - master
   schedule:
-    - cron: '0 12 * * *'
+    - cron: "0 12 * * *"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: self-hosted
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,13 +43,7 @@ jobs:
             ${{ runner.os }}-v1-
       - run: bun install
       - run: bun run build
-      - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          personal_token: ${{ secrets.GIT_TOKEN }}
-          user_name: ${{ secrets.GIT_USER }}
-          user_email: ${{ secrets.GIT_EMAIL }}
-          external_repository: SukkaLab/ruleset.skk.moe
-          publish_branch: master
-          publish_dir: public
-          cname: ruleset.skk.moe
+      - name: Push
+        run: scp -r public/* root@router.tomie.vollerei.io:/root/crush/magic-rules
+      - name: Notify
+        run: curl --fail -LX POST https://router.vollerei.io/api/rules/reload -o /dev/null -w '%{http_code}\n' -s > /dev/null
