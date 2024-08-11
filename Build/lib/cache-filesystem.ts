@@ -1,10 +1,13 @@
-// eslint-disable-next-line import/no-unresolved -- bun built-in module
-import { Database } from 'bun:sqlite';
+import createDb from 'better-sqlite3';
+import type { Database } from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
 import { mkdirSync } from 'fs';
 import picocolors from 'picocolors';
-import { traceSync } from './trace-runner';
+import { fastStringArrayJoin } from './misc';
+import { performance } from 'perf_hooks';
+import fs from 'fs';
+import { stringHash } from './string-hash';
 
 const identity = (x: any) => x;
 
@@ -15,24 +18,27 @@ const enum CacheStatus {
   Miss = 'miss'
 }
 
-export interface CacheOptions {
+export interface CacheOptions<S = string> {
+  /** Path to sqlite file dir */
   cachePath?: string,
-  tbd?: number
+  /** Time before deletion */
+  tbd?: number,
+  /** Cache table name */
+  tableName?: string,
+  type?: S extends string ? 'string' : 'buffer'
 }
 
-interface CacheApplyNonStringOption<T> {
-  ttl?: number | null,
-  serializer: (value: T) => string,
-  deserializer: (cached: string) => T,
-  temporaryBypass?: boolean
-}
-
-interface CacheApplyStringOption {
+interface CacheApplyRawOption {
   ttl?: number | null,
   temporaryBypass?: boolean
 }
 
-type CacheApplyOption<T> = T extends string ? CacheApplyStringOption : CacheApplyNonStringOption<T>;
+interface CacheApplyNonRawOption<T, S> extends CacheApplyRawOption {
+  serializer: (value: T) => S,
+  deserializer: (cached: S) => T
+}
+
+type CacheApplyOption<T, S> = T extends S ? CacheApplyRawOption : CacheApplyNonRawOption<T, S>;
 
 const randomInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -58,25 +64,44 @@ export const TTL = {
   TWO_WEEKS: () => randomInt(10, 14) * ONE_DAY
 };
 
-export class Cache {
+export class Cache<S = string> {
   db: Database;
-  tbd = 60 * 1000; // time before deletion
+  /** Time before deletion */
+  tbd = 60 * 1000;
+  /** SQLite file path */
   cachePath: string;
+  /** Table name */
+  tableName: string;
+  type: S extends string ? 'string' : 'buffer';
 
-  constructor({ cachePath = path.join(os.tmpdir() || '/tmp', 'hdc'), tbd }: CacheOptions = {}) {
+  constructor({
+    cachePath = path.join(os.tmpdir() || '/tmp', 'hdc'),
+    tbd,
+    tableName = 'cache',
+    type
+  }: CacheOptions<S> = {}) {
+    const start = performance.now();
+
     this.cachePath = cachePath;
     mkdirSync(this.cachePath, { recursive: true });
     if (tbd != null) this.tbd = tbd;
+    this.tableName = tableName;
+    if (type) {
+      this.type = type;
+    } else {
+      // @ts-expect-error -- fallback type
+      this.type = 'string';
+    }
 
-    const db = new Database(path.join(this.cachePath, 'cache.db'));
+    const db = createDb(path.join(this.cachePath, 'cache.db'));
 
-    db.exec('PRAGMA journal_mode = WAL;');
-    db.exec('PRAGMA synchronous = normal;');
-    db.exec('PRAGMA temp_store = memory;');
-    db.exec('PRAGMA optimize;');
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = normal');
+    db.pragma('temp_store = memory');
+    db.pragma('optimize');
 
-    db.prepare('CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, ttl REAL NOT NULL);').run();
-    db.prepare('CREATE INDEX IF NOT EXISTS cache_ttl ON cache (ttl);').run();
+    db.prepare(`CREATE TABLE IF NOT EXISTS ${this.tableName} (key TEXT PRIMARY KEY, value ${this.type === 'string' ? 'TEXT' : 'BLOB'}, ttl REAL NOT NULL);`).run();
+    db.prepare(`CREATE INDEX IF NOT EXISTS cache_ttl ON ${this.tableName} (ttl);`).run();
 
     const date = new Date();
 
@@ -84,7 +109,7 @@ export class Cache {
 
     // ttl + tbd < now => ttl < now - tbd
     const now = date.getTime() - this.tbd;
-    db.prepare('DELETE FROM cache WHERE ttl < ?').run(now);
+    db.prepare(`DELETE FROM ${this.tableName} WHERE ttl < ?`).run(now);
 
     this.db = db;
 
@@ -96,23 +121,31 @@ export class Cache {
       this.set('__LAST_VACUUM', dateString, 10 * 365 * 60 * 60 * 24 * 1000);
       this.db.exec('VACUUM;');
     }
+
+    const end = performance.now();
+    console.log(`${picocolors.gray(`[${((end - start) / 1e6).toFixed(3)}ms]`)} cache initialized from ${this.cachePath}`);
   }
 
   set(key: string, value: string, ttl = 60 * 1000): void {
     const insert = this.db.prepare(
-      'INSERT INTO cache (key, value, ttl) VALUES ($key, $value, $valid) ON CONFLICT(key) DO UPDATE SET value = $value, ttl = $valid'
+      `INSERT INTO ${this.tableName} (key, value, ttl) VALUES ($key, $value, $valid) ON CONFLICT(key) DO UPDATE SET value = $value, ttl = $valid`
     );
+
+    const valid = Date.now() + ttl;
 
     insert.run({
       $key: key,
+      key,
       $value: value,
-      $valid: Date.now() + ttl
+      value,
+      $valid: valid,
+      valid
     });
   }
 
-  get(key: string, defaultValue?: string): string | undefined {
-    const rv = this.db.prepare<{ value: string }, string>(
-      'SELECT value FROM cache WHERE key = ?'
+  get(key: string, defaultValue?: S): S | undefined {
+    const rv = this.db.prepare<string, { value: S }>(
+      `SELECT value FROM ${this.tableName} WHERE key = ? LIMIT 1`
     ).get(key);
 
     if (!rv) return defaultValue;
@@ -121,19 +154,19 @@ export class Cache {
 
   has(key: string): CacheStatus {
     const now = Date.now();
-    const rv = this.db.prepare<{ ttl: number }, string>('SELECT ttl FROM cache WHERE key = ?').get(key);
+    const rv = this.db.prepare<string, { ttl: number }>(`SELECT ttl FROM ${this.tableName} WHERE key = ?`).get(key);
 
     return !rv ? CacheStatus.Miss : (rv.ttl > now ? CacheStatus.Hit : CacheStatus.Stale);
   }
 
   del(key: string): void {
-    this.db.prepare('DELETE FROM cache WHERE key = ?').run(key);
+    this.db.prepare(`DELETE FROM ${this.tableName} WHERE key = ?`).run(key);
   }
 
   async apply<T>(
     key: string,
     fn: () => Promise<T>,
-    opt: CacheApplyOption<T>
+    opt: CacheApplyOption<T, S>
   ): Promise<T> {
     const { ttl, temporaryBypass } = opt;
 
@@ -146,20 +179,23 @@ export class Cache {
     }
 
     const cached = this.get(key);
-    let value: T;
     if (cached == null) {
       console.log(picocolors.yellow('[cache] miss'), picocolors.gray(key), picocolors.gray(`ttl: ${TTL.humanReadable(ttl)}`));
-      value = await fn();
 
       const serializer = 'serializer' in opt ? opt.serializer : identity;
-      this.set(key, serializer(value), ttl);
-    } else {
-      console.log(picocolors.green('[cache] hit'), picocolors.gray(key));
 
-      const deserializer = 'deserializer' in opt ? opt.deserializer : identity;
-      value = deserializer(cached);
+      const promise = fn();
+
+      return promise.then((value) => {
+        this.set(key, serializer(value), ttl);
+        return value;
+      });
     }
-    return value;
+
+    console.log(picocolors.green('[cache] hit'), picocolors.gray(key));
+
+    const deserializer = 'deserializer' in opt ? opt.deserializer : identity;
+    return deserializer(cached);
   }
 
   destroy() {
@@ -167,17 +203,20 @@ export class Cache {
   }
 }
 
-export const fsCache = traceSync('initializing filesystem cache', () => new Cache({ cachePath: path.resolve(import.meta.dir, '../../.cache') }));
+export const fsFetchCache = new Cache({ cachePath: path.resolve(__dirname, '../../.cache') });
 // process.on('exit', () => {
-//   fsCache.destroy();
+//   fsFetchCache.destroy();
 // });
 
+// export const fsCache = traceSync('initializing filesystem cache', () => new Cache<Uint8Array>({ cachePath: path.resolve(__dirname, '../../.cache'), type: 'buffer' }));
+
 const separator = '\u0000';
-// const textEncoder = new TextEncoder();
-// const textDecoder = new TextDecoder();
-// export const serializeString = (str: string) => textEncoder.encode(str);
-// export const deserializeString = (str: string) => textDecoder.decode(new Uint8Array(str.split(separator).map(Number)));
-export const serializeSet = (set: Set<string>) => Array.from(set).join(separator);
+export const serializeSet = (set: Set<string>) => fastStringArrayJoin(Array.from(set), separator);
 export const deserializeSet = (str: string) => new Set(str.split(separator));
-export const serializeArray = (arr: string[]) => arr.join(separator);
+export const serializeArray = (arr: string[]) => fastStringArrayJoin(arr, separator);
 export const deserializeArray = (str: string) => str.split(separator);
+
+export const createCacheKey = (filename: string) => {
+  const fileHash = stringHash(fs.readFileSync(filename, 'utf-8'));
+  return (key: string) => key + '$' + fileHash;
+};

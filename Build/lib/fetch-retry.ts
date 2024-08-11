@@ -1,18 +1,14 @@
 import retry from 'async-retry';
 import picocolors from 'picocolors';
+import { setTimeout } from 'timers/promises';
 
-// retry settings
-const MIN_TIMEOUT = 10;
-const MAX_RETRIES = 5;
-const MAX_RETRY_AFTER = 20;
-const FACTOR = 6;
+function isClientError(err: unknown): err is NodeJS.ErrnoException {
+  if (!err || typeof err !== 'object') return false;
 
-function isClientError(err: any): err is NodeJS.ErrnoException {
-  if (!err) return false;
-  return (
-    err.code === 'ERR_UNESCAPED_CHARACTERS'
-    || err.message === 'Request path contains unescaped characters'
-  );
+  if ('code' in err) return err.code === 'ERR_UNESCAPED_CHARACTERS';
+  if ('message' in err) return err.message === 'Request path contains unescaped characters';
+
+  return false;
 }
 
 export class ResponseError extends Error {
@@ -41,28 +37,30 @@ interface FetchRetryOpt {
   retries?: number,
   factor?: number,
   maxRetryAfter?: number,
-  retry?: number,
-  onRetry?: (err: Error) => void,
-  retryOnAborted?: boolean
+  // onRetry?: (err: Error) => void,
+  retryOnAborted?: boolean,
+  retryOnNon2xx?: boolean
 }
 
 interface FetchWithRetry {
   (url: string | URL | Request, opts?: RequestInit & { retry?: FetchRetryOpt }): Promise<Response>
 }
 
+const DEFAULT_OPT: Required<FetchRetryOpt> = {
+  // timeouts will be [10, 60, 360, 2160, 12960]
+  // (before randomization is added)
+  minTimeout: 10,
+  retries: 5,
+  factor: 6,
+  maxRetryAfter: 20,
+  retryOnAborted: false,
+  retryOnNon2xx: true
+};
+
 function createFetchRetry($fetch: typeof fetch): FetchWithRetry {
   const fetchRetry: FetchWithRetry = async (url, opts = {}) => {
     const retryOpts = Object.assign(
-      {
-        // timeouts will be [10, 60, 360, 2160, 12960]
-        // (before randomization is added)
-        minTimeout: MIN_TIMEOUT,
-        retries: MAX_RETRIES,
-        factor: FACTOR,
-        maxRetryAfter: MAX_RETRY_AFTER,
-        retryOnAborted: false,
-        retryOnNon2xx: true
-      },
+      DEFAULT_OPT,
       opts.retry
     );
 
@@ -70,7 +68,7 @@ function createFetchRetry($fetch: typeof fetch): FetchWithRetry {
       return await retry<Response>(async (bail) => {
         try {
           // this will be retried
-          const res = (await $fetch(url, opts)) as Response;
+          const res = (await $fetch(url, opts));
 
           if ((res.status >= 500 && res.status < 600) || res.status === 429) {
             // NOTE: doesn't support http-date format
@@ -81,7 +79,7 @@ function createFetchRetry($fetch: typeof fetch): FetchWithRetry {
                 if (retryAfter > retryOpts.maxRetryAfter) {
                   return res;
                 }
-                await Bun.sleep(retryAfter * 1e3);
+                await setTimeout(retryAfter * 1e3, undefined, { ref: false });
               }
             }
             throw new ResponseError(res);
@@ -129,7 +127,7 @@ function createFetchRetry($fetch: typeof fetch): FetchWithRetry {
 
 export const defaultRequestInit: RequestInit = {
   headers: {
-    'User-Agent': 'curl/8.1.2 (https://github.com/SukkaW/Surge)'
+    'User-Agent': 'curl/8.9.0 (https://github.com/SukkaW/Surge)'
   }
 };
 

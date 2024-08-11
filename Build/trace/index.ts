@@ -1,10 +1,8 @@
-import path from 'path';
+import { basename, extname } from 'path';
 import picocolors from 'picocolors';
 
 const SPAN_STATUS_START = 0;
 const SPAN_STATUS_END = 1;
-
-const NUM_OF_MS_IN_NANOSEC = 1_000_000;
 
 const spanTag = Symbol('span');
 
@@ -28,11 +26,15 @@ export interface Span {
   readonly traceChild: (name: string) => Span,
   readonly traceSyncFn: <T>(fn: (span: Span) => T) => T,
   readonly traceAsyncFn: <T>(fn: (span: Span) => T | Promise<T>) => Promise<T>,
+  readonly tracePromise: <T>(promise: Promise<T>) => Promise<T>,
+  readonly traceChildSync: <T>(name: string, fn: (span: Span) => T) => T,
+  readonly traceChildAsync: <T>(name: string, fn: (span: Span) => Promise<T>) => Promise<T>,
+  readonly traceChildPromise: <T>(name: string, promise: Promise<T>) => Promise<T>,
   readonly traceResult: TraceResult
 }
 
 export const createSpan = (name: string, parentTraceResult?: TraceResult): Span => {
-  const start = Bun.nanoseconds();
+  const start = performance.now();
 
   let curTraceResult: TraceResult;
 
@@ -41,7 +43,7 @@ export const createSpan = (name: string, parentTraceResult?: TraceResult): Span 
   } else {
     curTraceResult = {
       name,
-      start: start / NUM_OF_MS_IN_NANOSEC,
+      start,
       end: 0,
       children: []
     };
@@ -54,9 +56,9 @@ export const createSpan = (name: string, parentTraceResult?: TraceResult): Span 
     if (status === SPAN_STATUS_END) {
       throw new Error(`span already stopped: ${name}`);
     }
-    const end = time ?? Bun.nanoseconds();
+    const end = time ?? performance.now();
 
-    curTraceResult.end = end / NUM_OF_MS_IN_NANOSEC;
+    curTraceResult.end = end;
 
     status = SPAN_STATUS_END;
   };
@@ -68,51 +70,59 @@ export const createSpan = (name: string, parentTraceResult?: TraceResult): Span 
     stop,
     traceChild,
     traceSyncFn<T>(fn: (span: Span) => T) {
-      try {
-        return fn(span);
-      } finally {
-        span.stop();
-      }
+      const res = fn(span);
+      span.stop();
+      return res;
     },
     async traceAsyncFn<T>(fn: (span: Span) => T | Promise<T>): Promise<T> {
-      try {
-        return await fn(span);
-      } finally {
-        span.stop();
-      }
+      const res = await fn(span);
+      span.stop();
+      return res;
     },
-    get traceResult() {
-      return curTraceResult;
-    }
+    traceResult: curTraceResult,
+    async tracePromise<T>(promise: Promise<T>): Promise<T> {
+      const res = await promise;
+      span.stop();
+      return res;
+    },
+    traceChildSync: <T>(name: string, fn: (span: Span) => T): T => traceChild(name).traceSyncFn(fn),
+    traceChildAsync: <T>(name: string, fn: (span: Span) => T | Promise<T>): Promise<T> => traceChild(name).traceAsyncFn(fn),
+    traceChildPromise: <T>(name: string, promise: Promise<T>): Promise<T> => traceChild(name).tracePromise(promise)
   };
 
   // eslint-disable-next-line sukka/no-redundant-variable -- self reference
   return span;
 };
 
-export const task = <T>(importMetaPath: string, fn: (span: Span) => T, customname?: string) => {
-  const taskName = customname ?? path.basename(importMetaPath, path.extname(importMetaPath));
+export const task = (importMetaMain: boolean, importMetaPath: string) => <T>(fn: (span: Span) => Promise<T>, customName?: string) => {
+  const taskName = customName ?? basename(importMetaPath, extname(importMetaPath));
+
+  const dummySpan = createSpan(taskName);
+
+  if (importMetaMain) {
+    fn(dummySpan);
+  }
+
   return async (span?: Span) => {
     if (span) {
-      return span.traceChild(taskName).traceAsyncFn(fn);
+      return span.traceChildAsync(taskName, fn);
     }
-    return fn(createSpan(taskName));
+    return fn(dummySpan);
   };
 };
 
-const isSpan = (obj: any): obj is Span => {
-  return typeof obj === 'object' && obj && spanTag in obj;
-};
-
-export const universalify = <A extends any[], R>(taskname: string, fn: (this: void, ...args: A) => R) => {
-  return (...args: A) => {
-    const lastArg = args[args.length - 1];
-    if (isSpan(lastArg)) {
-      return lastArg.traceChild(taskname).traceSyncFn(() => fn(...args));
-    }
-    return fn(...args);
-  };
-};
+// const isSpan = (obj: any): obj is Span => {
+//   return typeof obj === 'object' && obj && spanTag in obj;
+// };
+// export const universalify = <A extends any[], R>(taskname: string, fn: (this: void, ...args: A) => R) => {
+//   return (...args: A) => {
+//     const lastArg = args[args.length - 1];
+//     if (isSpan(lastArg)) {
+//       return lastArg.traceChild(taskname).traceSyncFn(() => fn(...args));
+//     }
+//     return fn(...args);
+//   };
+// };
 
 export const printTraceResult = (traceResult: TraceResult = rootTraceResult) => {
   printStats(traceResult.children);
@@ -120,8 +130,7 @@ export const printTraceResult = (traceResult: TraceResult = rootTraceResult) => 
 };
 
 function printTree(initialTree: TraceResult, printNode: (node: TraceResult, branch: string) => string) {
-  function printBranch(tree: TraceResult, branch: string) {
-    const isGraphHead = branch.length === 0;
+  function printBranch(tree: TraceResult, branch: string, isGraphHead: boolean, isChildOfLastBranch: boolean) {
     const children = tree.children;
 
     let branchHead = '';
@@ -139,7 +148,6 @@ function printTree(initialTree: TraceResult, printNode: (node: TraceResult, bran
     let baseBranch = branch;
 
     if (!isGraphHead) {
-      const isChildOfLastBranch = branch.endsWith('└─');
       baseBranch = branch.slice(0, -2) + (isChildOfLastBranch ? '  ' : '│ ');
     }
 
@@ -147,27 +155,28 @@ function printTree(initialTree: TraceResult, printNode: (node: TraceResult, bran
     const lastBranch = `${baseBranch}└─`;
 
     children.forEach((child, index) => {
-      printBranch(child, children.length - 1 === index ? lastBranch : nextBranch);
+      const last = children.length - 1 === index;
+      printBranch(child, last ? lastBranch : nextBranch, false, last);
     });
   }
 
-  printBranch(initialTree, '');
+  printBranch(initialTree, '', true, false);
 }
 
 function printStats(stats: TraceResult[]): void {
-  stats.sort((a, b) => a.start - b.start);
-
   const longestTaskName = Math.max(...stats.map(i => i.name.length));
   const realStart = Math.min(...stats.map(i => i.start));
   const realEnd = Math.max(...stats.map(i => i.end));
 
-  const statsStep = ((realEnd - realStart) / 160) | 0;
+  const statsStep = ((realEnd - realStart) / 120) | 0;
 
-  stats.forEach(stat => {
-    console.log(
-      `[${stat.name}]${' '.repeat(longestTaskName - stat.name.length)}`,
-      ' '.repeat(((stat.start - realStart) / statsStep) | 0),
-      '='.repeat(Math.max(((stat.end - stat.start) / statsStep) | 0, 1))
-    );
-  });
+  stats
+    .sort((a, b) => a.start - b.start)
+    .forEach(stat => {
+      console.log(
+        `[${stat.name}]${' '.repeat(longestTaskName - stat.name.length)}`,
+        ' '.repeat(((stat.start - realStart) / statsStep) | 0),
+        '='.repeat(Math.max(((stat.end - stat.start) / statsStep) | 0, 1))
+      );
+    });
 }

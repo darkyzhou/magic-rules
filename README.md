@@ -27,9 +27,19 @@
 
 ```ini
 # Non IP
-RULE-SET,https://ruleset.skk.moe/List/non_ip/reject-drop.conf,REJECT-DROP
-DOMAIN-SET,https://ruleset.skk.moe/List/domainset/reject.conf,REJECT-TINYGIF
-RULE-SET,https://ruleset.skk.moe/List/non_ip/reject.conf,REJECT
+# 基础的 12 万拦截域名
+DOMAIN-SET,https://ruleset.skk.moe/List/domainset/reject.conf,REJECT,extended-matching
+# 额外 20 万拦截域名，作为基础的补充，启用时需要搭配基础一起使用
+# 在 Surge 5 for Mac（或更新版本），即使同时启用基础和额外的拦截域名也不会导致匹配性能下降或内存占用过高
+DOMAIN-SET,https://ruleset.skk.moe/List/domainset/reject_extra.conf,REJECT,extended-matching
+RULE-SET,https://ruleset.skk.moe/List/non_ip/reject.conf,REJECT,extended-matching
+RULE-SET,https://ruleset.skk.moe/List/non_ip/reject-no-drop.conf,REJECT-NO-DROP,extended-matching
+RULE-SET,https://ruleset.skk.moe/List/non_ip/reject-drop.conf,REJECT-DROP,extended-matching
+# URL-REGEX
+# 需搭配 Surge 模块 https://ruleset.skk.moe/Modules/sukka_mitm_hostnames.sgmodule 使用
+# MITM 和 URL-REGEX 性能开销极大，不推荐使用
+# RULE-SET,https://ruleset.skk.moe/List/non_ip/reject-url-regex.conf,REJECT
+
 # IP
 RULE-SET,https://ruleset.skk.moe/List/ip/reject.conf,REJECT-DROP
 ```
@@ -38,6 +48,13 @@ RULE-SET,https://ruleset.skk.moe/List/ip/reject.conf,REJECT-DROP
 
 ```yaml
 rule-providers:
+  reject_non_ip_no_drop:
+    type: http
+    behavior: classical
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/non_ip/reject-no-drop.txt
+    path: ./sukkaw_ruleset/reject_non_ip_no_drop.txt
   reject_non_ip_drop:
     type: http
     behavior: classical
@@ -52,13 +69,20 @@ rule-providers:
     interval: 43200
     url: https://ruleset.skk.moe/Clash/non_ip/reject.txt
     path: ./sukkaw_ruleset/reject_non_ip.txt
-  # WARNING! Using reject_domainset can cause Clash out of memory due to the insufficient Clash implementation.
   reject_domainset:
     type: http
     behavior: domain
     format: text
     interval: 43200
     url: https://ruleset.skk.moe/Clash/domainset/reject.txt
+    path: ./sukkaw_ruleset/reject_domainset.txt
+  # 在 Clash 上，同时启用基础和额外的拦截域名会导致内存占用过高和匹配用时增加等性能问题
+  reject_extra_domainset:
+    type: http
+    behavior: domain
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/domainset/reject_extra.txt
     path: ./sukkaw_ruleset/reject_domainset.txt
   reject_ip:
     type: http
@@ -69,11 +93,14 @@ rule-providers:
     path: ./sukkaw_ruleset/reject_ip.txt
 
 rules:
-  - RULE-SET,reject_non_ip_drop,REJECT-DROP
   - RULE-SET,reject_non_ip,REJECT
-  # WARNING! Using reject_domainset can cause Clash out of memory due to the insufficient Clash implementation.
+
   - RULE-SET,reject_domainset,REJECT
+  - RULE-SET,reject_extra_domainset,REJECT
+
   - RULE-SET,reject_ip,REJECT
+  - RULE-SET,reject_non_ip_drop,REJECT-DROP
+  - RULE-SET,reject_non_ip_no_drop,REJECT
 ```
 
 #### 搜狗输入法
@@ -104,6 +131,19 @@ rules:
   - RULE-SET,sogouinput,REJECT
 ```
 
+#### Speedtest 测速域名
+
+- `speedtest.net` 测速点通过 Speedtest API 获取数十个常见地区的测速服务器域名
+- 人工维护 macOS `netQuality` 等其它测速工具的测速服务器域名
+- `fast.com` 测速点和 Netflix CDN 共享基础设施和域名、影响流媒体分流，故不包含在此规则组中
+- 实现指定使用某网络出口测速、同时不影响通过主要出口正常上网
+
+**Surge**
+
+```ini
+DOMAIN-SET,https://ruleset.skk.moe/List/domainset/speedtest.conf,[替换你的策略名],extended-matching
+```
+
 #### 常见静态 CDN
 
 - 自动生成 + 人工维护
@@ -128,9 +168,17 @@ rule-providers:
     interval: 43200
     url: https://ruleset.skk.moe/Clash/domainset/cdn.txt
     path: ./sukkaw_ruleset/cdn_domainset.txt
+  cdn_non_ip:
+    type: http
+    behavior: classical
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/non_ip/cdn.txt
+    path: ./sukkaw_ruleset/cdn_non_ip.txt
 
 rules:
   - RULE-SET,cdn_domainset,[Replace with your policy]
+  - RULE-SET,cdn_non_ip,[Replace with your policy]
 ```
 
 #### 流媒体
@@ -182,7 +230,7 @@ rule-providers:
     format: text
     interval: 43200
     url: https://ruleset.skk.moe/Clash/ip/stream_us.txt
-    path: ./sukkaw_ruleset/stream_ip.txt
+    path: ./sukkaw_ruleset/stream_us_ip.txt
   # 欧洲相关流媒体
   stream_eu_non_ip:
     type: http
@@ -295,7 +343,7 @@ rules:
 #### AI
 
 - 域名规则 人工维护
-- 包含 OpenAI、Bard、Claude、Perplexity 等
+- 包含 OpenAI、Google Gemini、Claude、Perplexity 等
 
 **Surge**
 
@@ -309,7 +357,7 @@ RULE-SET,https://ruleset.skk.moe/List/non_ip/ai.conf,[Replace with your policy]
 rule-providers:
   ai_non_ip:
     type: http
-    behavior: domain
+    behavior: classical
     format: text
     interval: 43200
     url: https://ruleset.skk.moe/Clash/non_ip/ai.txt
@@ -326,7 +374,7 @@ rules:
 - ASN 规则 人工维护
 
 > 推荐仅使用 IP CIDR 规则。IP CIDR 规则数据完全来自 Telegram 官方发布的 CIDR 列表，不包含 Telegram 尚未启用的 CDN、数据中心的 IP。
-> ASN 规则仅 Surge 支持，且仅作为补充。在使用非官方 MaxMind 数据库（例如 GeoIP2-CN）时可能会受到影响。
+> ASN 规则仅适合作为补充；搭配非官方 MaxMind GeoLite 数据库（例如 GeoIP2-CN）使用时会影响匹配。
 
 **Surge**
 
@@ -412,6 +460,33 @@ rule-providers:
 
 rules:
   - RULE-SET,apple_services,[Replace with your policy]
+```
+
+#### Apple CN
+
+- 人工维护
+- 云上贵州（`icloud.com.cn`）和 苹果地图大陆特供版 等服务的域名。
+
+**Surge**
+
+```ini
+RULE-SET,https://ruleset.skk.moe/List/non_ip/apple_cn.conf,DIRECT
+```
+
+**Clash Premium**
+
+```yaml
+rule-providers:
+  apple_cn_non_ip:
+    type: http
+    behavior: classical
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/non_ip/apple_cn.txt
+    path: ./sukkaw_ruleset/apple_cn_non_ip.txt
+
+rules:
+  - RULE-SET,apple_cn_non_ip,[Replace with your policy]
 ```
 
 #### Microsoft CDN
@@ -529,7 +604,7 @@ rule-providers:
     path: ./sukkaw_ruleset/download_domainset.txt
   download_non_ip:
     type: http
-    behavior: domain
+    behavior: classical
     format: text
     interval: 43200
     url: https://ruleset.skk.moe/Clash/non_ip/download.txt
@@ -538,6 +613,45 @@ rule-providers:
 rules:
   - RULE-SET,download_domainset,[Replace with your policy]
   - RULE-SET,download_non_ip,[Replace with your policy]
+```
+
+#### 内网域名和局域网 IP
+
+- 人工维护
+- 域名列表包含 `.local` 和局域网 IP 的 `in-addr.arpa` 域名（即 AS112 域名）。这部分域名一般会被解析到局域网 IP、需要走内网 DNS 解析、需要直连访问。
+- Clash 没有内置局域网 IP 规则列表（Surge 内置有局域网 IP 规则列表 `LAN`），需要手动引入。
+
+**Surge**
+
+```ini
+# Non IP
+RULE-SET,https://ruleset.skk.moe/List/non_ip/lan.conf,DIRECT
+# IP
+RULE-SET,https://ruleset.skk.moe/List/ip/lan.conf,DIRECT
+```
+
+**Clash Premium**
+
+```yaml
+rule-providers:
+  lan_non_ip:
+    type: http
+    behavior: classical
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/non_ip/lan.txt
+    path: ./sukkaw_ruleset/lan_non_ip.txt
+  lan_ip:
+    type: http
+    behavior: classical
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/ip/lan.txt
+    path: ./sukkaw_ruleset/lan_ip.txt
+
+rules:
+  - RULE-SET,lan_non_ip,DIRECT
+  - RULE-SET,lan_ip,DIRECT
 ```
 
 #### Misc
@@ -549,7 +663,6 @@ rules:
 ```ini
 RULE-SET,https://ruleset.skk.moe/List/non_ip/domestic.conf,[Replace with your policy]
 RULE-SET,https://ruleset.skk.moe/List/non_ip/direct.conf,[Replace with your policy]
-RULE-SET,https://ruleset.skk.moe/List/non_ip/global_plus.conf,[Replace with your policy]
 RULE-SET,https://ruleset.skk.moe/List/non_ip/global.conf,PROXY
 RULE-SET,https://ruleset.skk.moe/List/ip/domestic.conf,[Replace with your policy]
 ```
@@ -572,13 +685,6 @@ rule-providers:
     interval: 43200
     url: https://ruleset.skk.moe/Clash/non_ip/direct.txt
     path: ./sukkaw_ruleset/direct_non_ip.txt
-  global_plus_non_ip:
-    type: http
-    behavior: classical
-    format: text
-    interval: 43200
-    url: https://ruleset.skk.moe/Clash/non_ip/global_plus.txt
-    path: ./sukkaw_ruleset/global_plus_non_ip.txt
   global_non_ip:
     type: http
     behavior: classical
@@ -597,7 +703,6 @@ rule-providers:
 rules:
   - RULE-SET,domestic_non_ip,[Replace with your policy]
   - RULE-SET,direct_non_ip,[Replace with your policy]
-  - RULE-SET,global_plus_non_ip,[Replace with your policy]
   - RULE-SET,global_non_ip,[Replace with your policy]
   - RULE-SET,domestic_ip,[Replace with your policy]
 ```
@@ -605,12 +710,15 @@ rules:
 #### chnroute CIDR
 
 - 自动生成
-- [原始数据](https://github.com/misakaio/chnroutes2) 由 Misaka Network, Inc.、DMIT, Inc.、NEROCLOUD Ltd.、Rainbow network Ltd.、MOACK Co., Ltd. 提供，由 Misaka Network, Inc. 整理，以 [CC BY-SA 2.0](https://creativecommons.org/licenses/by-sa/2.0/) 协议发布
+- IPv4 [原始数据](https://github.com/misakaio/chnroutes2) 由 Misaka Network, Inc. 以 [CC BY-SA 2.0](https://creativecommons.org/licenses/by-sa/2.0/) 协议发布，二次处理补充合并了 Misaka Network, Inc. 收不到 BGP 路由的部分国内段、排除了被 Misaka Network, Inc. 误收的在香港广播的 IP 段（通常由 中国移动国际 CMI 广播）
+- IPv6 原始数据 由 [gaoyifan/china-operator-ip](https://github.com/gaoyifan/china-operator-ip) 以 MIT 协议发布
 
 **Surge**
 
 ```ini
 RULE-SET,https://ruleset.skk.moe/List/ip/china_ip.conf,[Replace with your policy]
+# Only use it if you are using IPv6
+# RULE-SET,https://ruleset.skk.moe/List/ip/china_ip_ipv6.conf,[Replace with your policy]
 ```
 
 **Clash Premium**
@@ -624,9 +732,17 @@ rule-providers:
     interval: 43200
     url: https://ruleset.skk.moe/Clash/ip/china_ip.txt
     path: ./sukkaw_ruleset/china_ip.txt
-
+  china_ip_ipv6:
+    type: http
+    behavior: ipcidr
+    format: text
+    interval: 43200
+    url: https://ruleset.skk.moe/Clash/ip/china_ip_ipv6.txt
+    path: ./sukkaw_ruleset/china_ip.txt
 rules:
   - RULE-SET,china_ip,[Replace with your policy]
+  # Only use it if you are using IPv6
+  # - RULE-SET,china_ip_ipv6,[Replace with your policy]
 ```
 
 ## Surge 模块列表
@@ -635,10 +751,8 @@ rules:
 - Sukka Surge Network Test Domain: `https://ruleset.skk.moe/Modules/sukka_surge_network_test_domain.sgmodule`
 - Sukka MITM Hostnames: `https://ruleset.skk.moe/Modules/sukka_mitm_hostnames.sgmodule`
 - Sukka MITM All Hostnames: `https://ruleset.skk.moe/Modules/sukka_mitm_all_hostnames.sgmodule`
-- Fix No Network Alert Plus: `https://ruleset.skk.moe/Modules/sukka_fix_network_alert.sgmodule`
 - Exclude Reserved IP from Surge VIF: `https://ruleset.skk.moe/Modules/sukka_exclude_reservered_ip.sgmodule`
 - Common Always Real IP Hostnames: `https://ruleset.skk.moe/Modules/sukka_common_always_realip.sgmodule`
-- Hide iOS VPN Icon: `https://ruleset.skk.moe/Modules/ios_hide_vpn_icon.sgmodule`
 - Redirect Google CN to Google: `https://ruleset.skk.moe/Modules/google_cn_307.sgmodule`
 
 ## FAQ
@@ -649,7 +763,7 @@ rules:
 
 **有适用于 Clash 的规则组吗？**
 
-规则组仅支持 Clash Premium。「Surge 模块」不适用于任何版本的 Clash。
+规则组支持 Clash Premium 和 Clash Meta（mihomo）。「Surge 模块」不适用于任何版本的 Clash。
 
 **有适用于 Shadowrocket、Quantumult X、Loon、V2RayNG 的规则组吗？**
 
@@ -676,3 +790,9 @@ The `List/ip/china_ip.conf` file is licensed under [CC BY-SA 2.0](https://creati
 **Surge** © [Sukka](https://github.com/SukkaW), Authored and maintained by Sukka with help from contributors ([list](https://github.com/SukkaW/Surge/graphs/contributors)).
 
 > [Personal Website](https://skk.moe) · [Blog](https://blog.skk.moe) · GitHub [@SukkaW](https://github.com/SukkaW) · Telegram Channel [@SukkaChannel](https://t.me/SukkaChannel) · Twitter [@isukkaw](https://twitter.com/isukkaw) · Keybase [@sukka](https://keybase.io/sukka)
+
+<p align="center">
+  <a href="https://github.com/sponsors/SukkaW/">
+    <img src="https://sponsor.cdn.skk.moe/sponsors.svg"/>
+  </a>
+</p>

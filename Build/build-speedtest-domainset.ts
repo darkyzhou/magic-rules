@@ -4,26 +4,26 @@ import { createRuleset } from './lib/create-file';
 import { sortDomains } from './lib/stable-sort-domain';
 
 import { Sema } from 'async-sema';
-import * as tldts from 'tldts';
+import { getHostname } from 'tldts';
 import { task } from './trace';
 import { fetchWithRetry } from './lib/fetch-retry';
 import { SHARED_DESCRIPTION } from './lib/constants';
-import { getGorhillPublicSuffixPromise } from './lib/get-gorhill-publicsuffix';
-import picocolors from 'picocolors';
-import { fetchRemoteTextByLine } from './lib/fetch-text-by-line';
-import { processLine } from './lib/process-line';
-import { TTL, deserializeArray, fsCache, serializeArray } from './lib/cache-filesystem';
-import { createMemoizedPromise } from './lib/memo-promise';
+import { readFileIntoProcessedArray } from './lib/fetch-text-by-line';
+import { TTL, deserializeArray, fsFetchCache, serializeArray, createCacheKey } from './lib/cache-filesystem';
 
-import * as SetHelpers from 'mnemonist/set';
+import { createTrie } from './lib/trie';
 
 const s = new Sema(2);
+const cacheKey = createCacheKey(__filename);
 
-const latestTopUserAgentsPromise = fsCache.apply(
-  'https://unpkg.com/top-user-agents@latest/src/desktop.json',
-  () => fetchWithRetry('https://unpkg.com/top-user-agents@latest/src/desktop.json')
-    .then(res => res.json<string[]>())
-    .then(userAgents => userAgents.filter(ua => ua.startsWith('Mozilla/5.0 '))),
+const latestTopUserAgentsPromise = fsFetchCache.apply(
+  cacheKey('https://cdn.jsdelivr.net/npm/top-user-agents@latest/src/desktop.json'),
+  () => fetchWithRetry(
+    'https://cdn.jsdelivr.net/npm/top-user-agents@latest/src/desktop.json',
+    { signal: AbortSignal.timeout(1000 * 60) }
+  )
+    .then(res => res.json() as Promise<string[]>)
+    .then((userAgents) => userAgents.filter(ua => ua.startsWith('Mozilla/5.0 '))),
   {
     serializer: serializeArray,
     deserializer: deserializeArray,
@@ -39,8 +39,8 @@ const querySpeedtestApi = async (keyword: string): Promise<Array<string | null>>
   try {
     const randomUserAgent = topUserAgents[Math.floor(Math.random() * topUserAgents.length)];
 
-    return await fsCache.apply(
-      url,
+    return await fsFetchCache.apply(
+      cacheKey(url),
       () => s.acquire().then(() => fetchWithRetry(url, {
         headers: {
           dnt: '1',
@@ -58,13 +58,14 @@ const querySpeedtestApi = async (keyword: string): Promise<Array<string | null>>
             }
             : {})
         },
-        signal: AbortSignal.timeout(1000 * 4),
+        signal: AbortSignal.timeout(1000 * 60),
         retry: {
           retries: 2
         }
-      })).then(r => r.json<Array<{ url: string }>>()).then(data => data.reduce<string[]>(
+      })).then(r => r.json() as any).then((data: Array<{ url: string, host: string }>) => data.reduce<string[]>(
         (prev, cur) => {
-          const hn = tldts.getHostname(cur.url, { detectIp: false });
+          const line = cur.host || cur.url;
+          const hn = getHostname(line, { detectIp: false, validateHostname: true });
           if (hn) {
             prev.push(hn);
           }
@@ -83,161 +84,158 @@ const querySpeedtestApi = async (keyword: string): Promise<Array<string | null>>
   }
 };
 
-const getPreviousSpeedtestDomainsPromise = createMemoizedPromise(async () => {
-  const domains = new Set<string>();
-  for await (const l of await fetchRemoteTextByLine('https://ruleset.skk.moe/List/domainset/speedtest.conf')) {
-    const line = processLine(l);
-    if (line) {
-      domains.add(line);
-    }
-  }
-  return domains;
-});
+export const buildSpeedtestDomainSet = task(require.main === module, __filename)(async (span) => {
+  const domainTrie = createTrie(
+    [
+      // speedtest.net
+      '.speedtest.net',
+      '.speedtestcustom.com',
+      '.ooklaserver.net',
+      '.speed.misaka.one',
+      '.speedtest.rt.ru',
+      '.speedtest.aptg.com.tw',
+      '.speedtest.gslnetworks.com',
+      '.speedtest.jsinfo.net',
+      '.speedtest.i3d.net',
+      '.speedtestkorea.com',
+      '.speedtest.telus.com',
+      '.speedtest.telstra.net',
+      '.speedtest.clouvider.net',
+      '.speedtest.idv.tw',
+      '.speedtest.frontier.com',
+      '.speedtest.orange.fr',
+      '.speedtest.centurylink.net',
+      '.srvr.bell.ca',
+      '.speedtest.contabo.net',
+      'speedtest.hk.chinamobile.com',
+      'speedtestbb.hk.chinamobile.com',
+      '.hizinitestet.com',
+      '.linknetspeedtest.net.br',
+      'speedtest.rit.edu',
+      'speedtest.ropa.de',
+      'speedtest.sits.su',
+      'speedtest.tigo.cr',
+      'speedtest.upp.com',
+      '.speedtest.pni.tw',
+      '.speed.pfm.gg',
+      '.speedtest.faelix.net',
+      '.speedtest.labixe.net',
+      '.speedtest.warian.net',
+      '.speedtest.starhub.com',
+      '.speedtest.gibir.net.tr',
+      '.speedtest.ozarksgo.net',
+      '.speedtest.exetel.com.au',
+      '.speedtest.sbcglobal.net',
+      '.speedtest.leaptel.com.au',
+      '.speedtest.windstream.net',
+      '.speedtest.vodafone.com.au',
+      '.speedtest.rascom.ru',
+      '.speedtest.dchost.com',
+      '.speedtest.highnet.com',
+      '.speedtest.seattle.wa.limewave.net',
+      '.speedtest.optitel.com.au',
+      '.speednet.net.tr',
+      '.speedtest.angolacables.co.ao',
+      '.ookla-speedtest.fsr.com',
+      '.speedtest.comnet.com.tr',
+      '.speedtest.gslnetworks.com.au',
+      '.test.gslnetworks.com.au',
+      '.speedtest.gslnetworks.com',
+      '.speedtestunonet.com.br',
+      '.speedtest.alagas.net',
+      'speedtest.surfshark.com',
+      '.speedtest.aarnet.net.au',
+      '.ookla.rcp.net',
+      '.ookla-speedtests.e2ro.com',
+      '.speedtest.com.sg',
+      '.ookla.ddnsgeek.com',
+      '.speedtest.pni.tw',
+      '.speedtest.cmcnetworks.net',
+      '.speedtestwnet.com.br',
+      // Cloudflare
+      '.speed.cloudflare.com',
+      // Wi-Fi Man
+      '.wifiman.com',
+      '.wifiman.me',
+      '.wifiman.ubncloud.com',
+      // Fast.com
+      '.fast.com',
+      // MacPaw
+      'speedtest.macpaw.com',
+      // speedtestmaster
+      '.netspeedtestmaster.com',
+      // Google Search Result of "speedtest", powered by this
+      '.measurement-lab.org',
+      '.measurementlab.net',
+      // Google Fiber legacy speedtest site (new fiber speedtest use speedtestcustom.com)
+      '.speed.googlefiber.net',
+      // librespeed
+      '.backend.librespeed.org',
+      // Apple,
+      'mensura.cdn-apple.com', // From netQuality command
+      // OpenSpeedtest
+      'open.cachefly.net'
+    ],
+    true,
+    true
+  );
 
-export const buildSpeedtestDomainSet = task(import.meta.path, async (span) => {
-  // Predefined domainset
-  /** @type {Set<string>} */
-  const domains = new Set<string>([
-    // speedtest.net
-    '.speedtest.net',
-    '.speedtestcustom.com',
-    '.ooklaserver.net',
-    '.speed.misaka.one',
-    '.speedtest.rt.ru',
-    '.speedtest.aptg.com.tw',
-    '.speedtest.gslnetworks.com',
-    '.speedtest.jsinfo.net',
-    '.speedtest.i3d.net',
-    '.speedtestkorea.com',
-    '.speedtest.telus.com',
-    '.speedtest.telstra.net',
-    '.speedtest.clouvider.net',
-    '.speedtest.idv.tw',
-    '.speedtest.frontier.com',
-    '.speedtest.orange.fr',
-    '.speedtest.centurylink.net',
-    '.srvr.bell.ca',
-    '.speedtest.contabo.net',
-    'speedtest.hk.chinamobile.com',
-    'speedtestbb.hk.chinamobile.com',
-    '.hizinitestet.com',
-    '.linknetspeedtest.net.br',
-    'speedtest.rit.edu',
-    'speedtest.ropa.de',
-    'speedtest.sits.su',
-    'speedtest.tigo.cr',
-    'speedtest.upp.com',
-    '.speedtest.pni.tw',
-    '.speed.pfm.gg',
-    '.speedtest.faelix.net',
-    '.speedtest.labixe.net',
-    '.speedtest.warian.net',
-    '.speedtest.starhub.com',
-    '.speedtest.gibir.net.tr',
-    '.speedtest.ozarksgo.net',
-    '.speedtest.exetel.com.au',
-    '.speedtest.sbcglobal.net',
-    '.speedtest.leaptel.com.au',
-    '.speedtest.windstream.net',
-    '.speedtest.vodafone.com.au',
-    '.speedtest.rascom.ru',
-    '.speedtest.dchost.com',
-    '.speedtest.highnet.com',
-    '.speedtest.seattle.wa.limewave.net',
-    '.speedtest.optitel.com.au',
-    '.speednet.net.tr',
-    '.speedtest.angolacables.co.ao',
-    '.ookla-speedtest.fsr.com',
-    '.speedtest.comnet.com.tr',
-    '.speedtest.gslnetworks.com.au',
-    '.test.gslnetworks.com.au',
-    '.speedtest.gslnetworks.com',
-    '.speedtestunonet.com.br',
-    '.speedtest.alagas.net',
-    'speedtest.surfshark.com',
-    // Cloudflare
-    '.speed.cloudflare.com',
-    // Wi-Fi Man
-    '.wifiman.com',
-    '.wifiman.me',
-    // Fast.com
-    '.fast.com',
-    // MacPaw
-    'speedtest.macpaw.com',
-    // speedtestmaster
-    '.netspeedtestmaster.com',
-    // Google Search Result of "speedtest", powered by this
-    '.measurement-lab.org',
-    '.measurementlab.net',
-    // Google Fiber legacy speedtest site (new fiber speedtest use speedtestcustom.com)
-    '.speed.googlefiber.net',
-    // librespeed
-    '.backend.librespeed.org'
-  ]);
-
-  await span.traceChild('fetch previous speedtest domainset').traceAsyncFn(async () => {
-    SetHelpers.add(domains, await getPreviousSpeedtestDomainsPromise());
-  });
-
-  await new Promise<void>((resolve) => {
-    const pMap = ([
-      'Hong Kong',
-      'Taiwan',
-      'China Telecom',
-      'China Mobile',
-      'China Unicom',
-      'Japan',
-      'Tokyo',
-      'Singapore',
-      'Korea',
-      'Canada',
-      'Toronto',
-      'Montreal',
-      'Los Ang',
-      'San Jos',
-      'Seattle',
-      'New York',
-      'Dallas',
-      'Miami',
-      'Berlin',
-      'Frankfurt',
-      'London',
-      'Paris',
-      'Amsterdam',
-      'Moscow',
-      'Australia',
-      'Sydney',
-      'Brazil',
-      'Turkey'
-    ]).reduce<Record<string, Promise<void>>>((pMap, keyword) => {
-      pMap[keyword] = span.traceChild(`fetch speedtest endpoints: ${keyword}`).traceAsyncFn(() => querySpeedtestApi(keyword)).then(hostnameGroup => {
-        hostnameGroup.forEach(hostname => {
-          if (hostname) {
-            domains.add(hostname);
+  await span.traceChildAsync(
+    'fetch previous speedtest domainset',
+    async () => {
+      try {
+        (
+          await readFileIntoProcessedArray(path.resolve(__dirname, '../List/domainset/speedtest.conf'))
+        ) .forEach(line => {
+          const hn = getHostname(line, { detectIp: false, validateHostname: true });
+          if (hn) {
+            domainTrie.add(hn);
           }
         });
-      });
+      } catch { }
+    }
+  );
 
-      return pMap;
-    }, {});
+  await Promise.all([
+    'Hong Kong',
+    'Taiwan',
+    'China Telecom',
+    'China Mobile',
+    'China Unicom',
+    'Japan',
+    'Tokyo',
+    'Singapore',
+    'Korea',
+    'Seoul',
+    'Canada',
+    'Toronto',
+    'Montreal',
+    'Los Ang',
+    'San Jos',
+    'Seattle',
+    'New York',
+    'Dallas',
+    'Miami',
+    'Berlin',
+    'Frankfurt',
+    'London',
+    'Paris',
+    'Amsterdam',
+    'Moscow',
+    'Australia',
+    'Sydney',
+    'Brazil',
+    'Turkey'
+  ].map((keyword) => span.traceChildAsync(
+    `fetch speedtest endpoints: ${keyword}`,
+    () => querySpeedtestApi(keyword)
+  ).then(hostnameGroup => hostnameGroup.forEach(hostname => {
+    if (hostname) {
+      domainTrie.add(hostname);
+    }
+  }))));
 
-    const timer = setTimeout(() => {
-      console.error(picocolors.red('Task timeout!'));
-      Object.entries(pMap).forEach(([name, p]) => {
-        console.log(`[${name}]`, Bun.peek.status(p));
-      });
-
-      resolve();
-    }, 1000 * 60 * 2);
-
-    Promise.all(Object.values(pMap)).then(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-
-  const gorhill = await getGorhillPublicSuffixPromise();
-  const deduped = span.traceChild('sort result').traceSyncFn(() => sortDomains(domainDeduper(Array.from(domains)), gorhill));
+  const deduped = span.traceChildSync('sort result', () => sortDomains(domainDeduper(domainTrie)));
 
   const description = [
     ...SHARED_DESCRIPTION,
@@ -252,11 +250,8 @@ export const buildSpeedtestDomainSet = task(import.meta.path, async (span) => {
     new Date(),
     deduped,
     'domainset',
-    path.resolve(import.meta.dir, '../List/domainset/speedtest.conf'),
-    path.resolve(import.meta.dir, '../Clash/domainset/speedtest.txt')
+    path.resolve(__dirname, '../List/domainset/speedtest.conf'),
+    path.resolve(__dirname, '../Clash/domainset/speedtest.txt'),
+    path.resolve(__dirname, '../Clash/clash_mrs_domain/speedtest.mrs')
   );
 });
-
-if (import.meta.main) {
-  buildSpeedtestDomainSet();
-}

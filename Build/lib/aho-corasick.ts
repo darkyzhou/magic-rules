@@ -1,95 +1,81 @@
-interface Node {
-  /** @default 0 */
-  depth?: number,
-  key: string,
-  /** @default false */
-  word?: boolean,
-  children: Record<string, Node>,
-  fail?: Node,
-  count: number
-}
+const WORDEND = Symbol('wordEnd');
+const FAIL = Symbol('fail');
 
-const createNode = (key: string, depth = 0): Node => ({
-  depth,
-  key,
-  word: false,
-  children: {},
-  fail: undefined,
-  count: 0
-});
+type Node = Map<string, Node> & {
+  [WORDEND]: boolean,
+  [FAIL]: Node | undefined
+};
+
+const createNode = (): Node => {
+  const node = new Map<string, Node | undefined>() as Node;
+  node[WORDEND] = false;
+  node[FAIL] = undefined;
+  return node;
+};
 
 const createKeywordFilter = (keys: string[] | Set<string>) => {
-  const root = createNode('root');
+  const root = createNode();
 
-  const build = () => {
-    const queue: Node[] = [];
-    queue.push(root);
+  // Create a trie with extra fields and information
+  const put = (key: string) => {
+    const len = key.length;
 
-    let idx = 0;
-    while (queue.length > idx) {
-      const beginNode = queue[idx];
-      const map = beginNode.children;
-      // eslint-disable-next-line guard-for-in -- plain object
-      for (const key in beginNode.children) {
-        const node = map[key];
-        let failNode = beginNode.fail;
-
-        while (failNode && !failNode.children[key]) {
-          failNode = failNode.fail;
-        }
-
-        if (node) {
-          node.fail = failNode?.children[key] || root;
-
-          queue.push(node);
-        }
-      }
-
-      idx++;
-    }
-  };
-
-  const put = (key: string, len: number) => {
     let node = root;
-    const lastIdx = len - 1;
-    node.count++;
-    for (let idx = 0; idx < len; idx++) {
-      const val = key[idx];
-      const nextNode = node.children[val];
 
-      if (nextNode) {
-        nextNode.count++;
-        node = nextNode;
+    for (let idx = 0; idx < len; idx++) {
+      const char = key[idx];
+
+      if (node.has(char)) {
+        node = node.get(char)!;
       } else {
-        const newNode = createNode(val, idx + 1);
-        newNode.count = 1;
-        node.children[val] = newNode;
+        const newNode = createNode();
+        node.set(char, newNode);
         node = newNode;
       }
+    }
 
-      if (lastIdx === idx && node.depth) {
-        node.word = true;
-      }
+    // If a new node is created, mark it as a word end when loop finish
+    if (node !== root) {
+      node[WORDEND] = true;
     }
   };
 
-  keys.forEach(k => put(k, k.length));
+  keys.forEach(put);
 
-  build();
+  // const build = () => {
+  const queue: Node[] = [root];
+
+  while (queue.length) {
+    const beginNode = queue.pop()!;
+
+    beginNode.forEach((node, char) => {
+      let failNode = beginNode[FAIL];
+
+      while (failNode && !failNode.has(char)) {
+        failNode = failNode[FAIL];
+      }
+
+      node[FAIL] = failNode ? failNode.get(char) : root;
+
+      queue.push(node);
+    });
+  }
+  // };
+  // build();
 
   return (text: string) => {
     let node: Node | undefined = root;
 
     for (let i = 0, textLen = text.length; i < textLen; i++) {
-      // const key = text.charAt(i);
-      const key = text[i];
+      const char = text[i];
 
-      while (node && !node.children[key]) {
-        node = node.fail;
+      while (node && !node.has(char)) {
+        node = node[FAIL];
       }
-      node = node?.children[key] || root;
 
-      if (node.word) {
+      node = node ? node.get(char)! : root;
+
+      if (node[WORDEND]) {
         return true;
       }
     }

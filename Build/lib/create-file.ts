@@ -1,28 +1,27 @@
 // @ts-check
-import { readFileByLine } from './fetch-text-by-line';
 import { surgeDomainsetToClashDomainset, surgeRulesetToClashClassicalTextRuleset } from './clash';
 import picocolors from 'picocolors';
 import type { Span } from '../trace';
 import path from 'path';
+import fs from 'fs';
+import { fastStringArrayJoin, writeFile } from './misc';
+import { readFileByLine } from './fetch-text-by-line';
 
 export async function compareAndWriteFile(span: Span, linesA: string[], filePath: string) {
   let isEqual = true;
-  const file = Bun.file(filePath);
-
   const linesALen = linesA.length;
 
-  if (!(await file.exists())) {
+  if (!fs.existsSync(filePath)) {
     console.log(`${filePath} does not exists, writing...`);
     isEqual = false;
   } else if (linesALen === 0) {
     console.log(`Nothing to write to ${filePath}...`);
     isEqual = false;
   } else {
-    isEqual = await span.traceChild(`comparing ${filePath}`).traceAsyncFn(async () => {
+    isEqual = await span.traceChildAsync(`comparing ${filePath}`, async () => {
       let index = 0;
-
-      for await (const lineB of readFileByLine(file)) {
-        const lineA = linesA[index];
+      for await (const lineB of readFileByLine(filePath)) {
+        const lineA = linesA[index] as string | undefined;
         index++;
 
         if (lineA == null) {
@@ -35,11 +34,11 @@ export async function compareAndWriteFile(span: Span, linesA: string[], filePath
         }
         if (
           lineA[0] === '/'
-            && lineA[1] === '/'
-            && lineA[3] === '#'
-            && lineB[0] === '/'
-            && lineB[1] === '/'
-            && lineB[3] === '#'
+          && lineA[1] === '/'
+          && lineB[0] === '/'
+          && lineB[1] === '/'
+          && lineA[3] === '#'
+          && lineB[3] === '#'
         ) {
           continue;
         }
@@ -63,19 +62,18 @@ export async function compareAndWriteFile(span: Span, linesA: string[], filePath
     return;
   }
 
-  await span.traceChild(`writing ${filePath}`).traceAsyncFn(async () => {
-    if (linesALen < 10000) {
-      return Bun.write(file, `${linesA.join('\n')}\n`);
-    }
+  await span.traceChildAsync(`writing ${filePath}`, async () => {
+    // if (linesALen < 10000) {
+    return writeFile(filePath, fastStringArrayJoin(linesA, '\n') + '\n');
+    // }
+    // const writer = file.writer();
 
-    const writer = file.writer();
+    // for (let i = 0; i < linesALen; i++) {
+    //   writer.write(linesA[i]);
+    //   writer.write('\n');
+    // }
 
-    for (let i = 0; i < linesALen; i++) {
-      writer.write(linesA[i]);
-      writer.write('\n');
-    }
-
-    return writer.end();
+    // return writer.end();
   });
 }
 
@@ -92,29 +90,105 @@ export const withBannerArray = (title: string, description: string[] | readonly 
   ];
 };
 
+const collectType = (rule: string) => {
+  let buf = '';
+  for (let i = 0, len = rule.length; i < len; i++) {
+    if (rule[i] === ',') {
+      return buf;
+    }
+    buf += rule[i];
+  }
+  return null;
+};
+
+const defaultSortTypeOrder = Symbol('defaultSortTypeOrder');
+const sortTypeOrder: Record<string | typeof defaultSortTypeOrder, number> = {
+  DOMAIN: 1,
+  'DOMAIN-SUFFIX': 2,
+  'DOMAIN-KEYWORD': 10,
+  // experimental domain wildcard support
+  'DOMAIN-WILDCARD': 20,
+  'USER-AGENT': 30,
+  'PROCESS-NAME': 40,
+  [defaultSortTypeOrder]: 50, // default sort order for unknown type
+  'URL-REGEX': 100,
+  AND: 300,
+  OR: 300,
+  'IP-CIDR': 400,
+  'IP-CIDR6': 400
+};
+// sort DOMAIN-SUFFIX and DOMAIN first, then DOMAIN-KEYWORD, then IP-CIDR and IP-CIDR6 if any
+export const sortRuleSet = (ruleSet: string[]) => {
+  return ruleSet.map((rule) => {
+    const type = collectType(rule);
+    if (!type) {
+      return [10, rule] as const;
+    }
+    if (!(type in sortTypeOrder)) {
+      return [sortTypeOrder[defaultSortTypeOrder], rule] as const;
+    }
+    if (type === 'URL-REGEX') {
+      let extraWeight = 0;
+      if (rule.includes('.+') || rule.includes('.*')) {
+        extraWeight += 10;
+      }
+      if (rule.includes('|')) {
+        extraWeight += 1;
+      }
+
+      return [
+        sortTypeOrder[type] + extraWeight,
+        rule
+      ] as const;
+    }
+    return [sortTypeOrder[type], rule] as const;
+  }).sort((a, b) => a[0] - b[0])
+    .map(c => c[1]);
+};
+
+const MARK = 'this_ruleset_is_made_by_sukkaw.ruleset.skk.moe';
+
 export const createRuleset = (
   parentSpan: Span,
   title: string, description: string[] | readonly string[], date: Date, content: string[],
-  type: 'ruleset' | 'domainset', surgePath: string, clashPath: string
-) => parentSpan.traceChild(`create ruleset: ${path.basename(surgePath, path.extname(surgePath))}`).traceAsyncFn((childSpan) => {
-  const surgeContent = withBannerArray(title, description, date, content);
-  const clashContent = childSpan.traceChild('convert incoming ruleset to clash').traceSyncFn(() => {
+  type: ('ruleset' | 'domainset' | string & {}),
+  surgePath: string, clashPath: string,
+  clashMrsPath?: string
+) => parentSpan.traceChild(`create ruleset: ${path.basename(surgePath, path.extname(surgePath))}`).traceAsyncFn(async (childSpan) => {
+  const surgeContent = withBannerArray(
+    title, description, date,
+    sortRuleSet(type === 'domainset'
+      ? [MARK, ...content]
+      : [`DOMAIN,${MARK}`, ...content])
+  );
+  const clashContent = childSpan.traceChildSync('convert incoming ruleset to clash', () => {
     let _clashContent;
     switch (type) {
       case 'domainset':
-        _clashContent = surgeDomainsetToClashDomainset(content);
+        _clashContent = [MARK, ...surgeDomainsetToClashDomainset(content)];
         break;
       case 'ruleset':
-        _clashContent = surgeRulesetToClashClassicalTextRuleset(content);
+        _clashContent = [`DOMAIN,${MARK}`, ...surgeRulesetToClashClassicalTextRuleset(content)];
         break;
       default:
-        throw new TypeError(`Unknown type: ${type as any}`);
+        throw new TypeError(`Unknown type: ${type}`);
     }
     return withBannerArray(title, description, date, _clashContent);
   });
 
-  return Promise.all([
+  await Promise.all([
     compareAndWriteFile(childSpan, surgeContent, surgePath),
     compareAndWriteFile(childSpan, clashContent, clashPath)
   ]);
+
+  // if (clashMrsPath) {
+  //   if (type === 'domainset') {
+  //     await childSpan.traceChildAsync('clash meta mrs domain ' + clashMrsPath, async () => {
+  //       await fs.promises.mkdir(path.dirname(clashMrsPath), { recursive: true });
+  //       await convertClashMetaMrs(
+  //         'domain', 'text', clashPath, clashMrsPath
+  //       );
+  //     });
+  //   }
+  // }
 });

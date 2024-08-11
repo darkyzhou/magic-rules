@@ -1,21 +1,20 @@
+console.log('Version:', process.version);
+
 import { downloadPreviousBuild } from './download-previous-build';
 import { buildCommon } from './build-common';
-import { buildAntiBogusDomain } from './build-anti-bogus-domain';
+import { buildRejectIPList } from './build-reject-ip-list';
 import { buildAppleCdn } from './build-apple-cdn';
 import { buildCdnDownloadConf } from './build-cdn-download-conf';
 import { buildRejectDomainSet } from './build-reject-domainset';
 import { buildTelegramCIDR } from './build-telegram-cidr';
 import { buildChnCidr } from './build-chn-cidr';
 import { buildSpeedtestDomainSet } from './build-speedtest-domainset';
-import { buildInternalCDNDomains } from './build-internal-cdn-rules';
-// import { buildInternalChnDomains } from './build-internal-chn-domains';
-import { buildDomesticRuleset } from './build-domestic-ruleset';
+import { buildInternalReverseChnCIDR } from './build-internal-reverse-chn-cidr';
+import { buildDomesticRuleset } from './build-domestic-direct-lan-ruleset-dns-mapping-module';
 import { buildStreamService } from './build-stream-service';
 
 import { buildRedirectModule } from './build-sgmodule-redirect';
 import { buildAlwaysRealIPModule } from './build-sgmodule-always-realip';
-
-import { validate } from './validate-domainset';
 
 import { buildMicrosoftCdn } from './build-microsoft-cdn';
 import { buildSSPanelUIMAppProfile } from './build-sspanel-appprofile';
@@ -26,42 +25,33 @@ import { downloadMockAssets } from './download-mock-assets';
 import { buildCloudMounterRules } from './build-cloudmounter-rules';
 
 import { createSpan, printTraceResult } from './trace';
+import { buildDeprecateFiles } from './build-deprecate-files';
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+  process.exit(1);
+});
 
 (async () => {
-  console.log('Bun version:', Bun.version, Bun.revision);
-
   const rootSpan = createSpan('root');
 
   try {
-    // TODO: restore this once Bun has fixed their worker
-    // const buildInternalReverseChnCIDRWorker = new Worker(new URL('./workers/build-internal-reverse-chn-cidr-worker.ts', import.meta.url));
-
     const downloadPreviousBuildPromise = downloadPreviousBuild(rootSpan);
 
     const buildCommonPromise = downloadPreviousBuildPromise.then(() => buildCommon(rootSpan));
-    const buildAntiBogusDomainPromise = downloadPreviousBuildPromise.then(() => buildAntiBogusDomain(rootSpan));
+    const buildRejectIPListPromise = downloadPreviousBuildPromise.then(() => buildRejectIPList(rootSpan));
     const buildAppleCdnPromise = downloadPreviousBuildPromise.then(() => buildAppleCdn(rootSpan));
     const buildCdnConfPromise = downloadPreviousBuildPromise.then(() => buildCdnDownloadConf(rootSpan));
     const buildRejectDomainSetPromise = downloadPreviousBuildPromise.then(() => buildRejectDomainSet(rootSpan));
     const buildTelegramCIDRPromise = downloadPreviousBuildPromise.then(() => buildTelegramCIDR(rootSpan));
     const buildChnCidrPromise = downloadPreviousBuildPromise.then(() => buildChnCidr(rootSpan));
     const buildSpeedtestDomainSetPromise = downloadPreviousBuildPromise.then(() => buildSpeedtestDomainSet(rootSpan));
-    const buildInternalCDNDomainsPromise = Promise.all([
-      buildCommonPromise,
-      buildCdnConfPromise
-    ]).then(() => buildInternalCDNDomains(rootSpan));
 
-    // const buildInternalReverseChnCIDRPromise = new Promise<TaskResult>(resolve => {
-    //   const handleMessage = (e: MessageEvent<TaskResult>) => {
-    //     const { data } = e;
-
-    //     buildInternalReverseChnCIDRWorker.postMessage('exit');
-    //     buildInternalReverseChnCIDRWorker.removeEventListener('message', handleMessage);
-    //     resolve(data);
-    //   };
-    //   buildInternalReverseChnCIDRWorker.addEventListener('message', handleMessage);
-    //   buildInternalReverseChnCIDRWorker.postMessage('build');
-    // });
+    const buildInternalReverseChnCIDRPromise = buildInternalReverseChnCIDR(rootSpan);
 
     // const buildInternalChnDomainsPromise = buildInternalChnDomains();
     const buildDomesticRulesetPromise = downloadPreviousBuildPromise.then(() => buildDomesticRuleset(rootSpan));
@@ -73,26 +63,26 @@ import { createSpan, printTraceResult } from './trace';
 
     const buildMicrosoftCdnPromise = downloadPreviousBuildPromise.then(() => buildMicrosoftCdn(rootSpan));
 
-    const buildSSPanelUIMAppProfilePromise = Promise.all([
-      downloadPreviousBuildPromise
-    ]).then(() => buildSSPanelUIMAppProfile(rootSpan));
+    const buildSSPanelUIMAppProfilePromise = downloadPreviousBuildPromise.then(() => buildSSPanelUIMAppProfile(rootSpan));
 
     const downloadMockAssetsPromise = downloadMockAssets(rootSpan);
 
     const buildCloudMounterRulesPromise = downloadPreviousBuildPromise.then(() => buildCloudMounterRules(rootSpan));
 
+    const buildDeprecateFilesPromise = downloadPreviousBuildPromise.then(() => buildDeprecateFiles(rootSpan));
+
     await Promise.all([
       downloadPreviousBuildPromise,
       buildCommonPromise,
-      buildAntiBogusDomainPromise,
+      buildRejectIPListPromise,
       buildAppleCdnPromise,
       buildCdnConfPromise,
       buildRejectDomainSetPromise,
       buildTelegramCIDRPromise,
       buildChnCidrPromise,
       buildSpeedtestDomainSetPromise,
-      buildInternalCDNDomainsPromise,
-      // buildInternalReverseChnCIDRPromise,
+      buildInternalReverseChnCIDRPromise,
+      buildInternalReverseChnCIDRPromise,
       // buildInternalChnDomainsPromise,
       buildDomesticRulesetPromise,
       buildRedirectModulePromise,
@@ -101,13 +91,11 @@ import { createSpan, printTraceResult } from './trace';
       buildMicrosoftCdnPromise,
       buildSSPanelUIMAppProfilePromise,
       buildCloudMounterRulesPromise,
+      buildDeprecateFilesPromise,
       downloadMockAssetsPromise
     ]);
 
-    await Promise.all([
-      buildPublic(rootSpan),
-      validate(rootSpan)
-    ]);
+    await buildPublic(rootSpan);
 
     rootSpan.stop();
 

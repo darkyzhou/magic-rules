@@ -1,18 +1,19 @@
 import path from 'path';
 import { task } from './trace';
 import { compareAndWriteFile } from './lib/create-file';
-import * as tldts from 'tldts';
+import { getHostname } from 'tldts';
+import { isTruthy } from './lib/misc';
 
 function escapeRegExp(string = '') {
   const reRegExpChar = /[$()*+.?[\\\]^{|}]/g;
   const reHasRegExpChar = new RegExp(reRegExpChar.source);
 
   return string && reHasRegExpChar.test(string)
-    ? string.replaceAll(reRegExpChar, '\\$&')
+    ? string.replaceAll(reRegExpChar, String.raw`\$&`)
     : string;
 }
 
-const REDIRECT = [
+const REDIRECT_MIRROR = [
   // Gravatar
   ['gravatar.neworld.org/', 'https://secure.gravatar.com/'],
   ['cdn.v2ex.com/gravatar/', 'https://secure.gravatar.com/avatar/'],
@@ -34,10 +35,10 @@ const REDIRECT = [
   // libravatar
   ['seccdn.libravatar.org/gravatarproxy/', 'https://secure.gravatar.com/'],
   // ghproxy
-  ['ghproxy.com/', ''],
-  ['ghps.cc/', ''],
+  ['ghproxy.com/', 'https://'],
+  ['ghps.cc/', 'https://'],
   // gh-proxy
-  ['github.moeyy.xyz/', ''],
+  ['github.moeyy.xyz/', 'https://'],
   // 7ED Services
   ['use.sevencdn.com/css', 'https://fonts.googleapis.com/css'],
   ['use.sevencdn.com/ajax/libs/', 'https://cdnjs.cloudflare.com/ajax/libs/'],
@@ -65,14 +66,70 @@ const REDIRECT = [
   // KGitHub
   ['raw.kgithub.com/', 'https://raw.githubusercontent.com/'],
   ['raw.kkgithub.com/', 'https://raw.githubusercontent.com/'],
+  // Polyfill
+  ['polyfill.io/', 'https://cdnjs.cloudflare.com/polyfill/'],
+  ['cdn.polyfill.io/', 'https://cdnjs.cloudflare.com/polyfill/'],
+  ['fastly-polyfill.io/', 'https://cdnjs.cloudflare.com/polyfill/'],
+  ['fastly-polyfill.net/', 'https://cdnjs.cloudflare.com/polyfill/'],
+  // BootCDN has been controlled by a malicious actor and being used to spread malware
+  ['cdn.bootcdn.net/', 'https://cdnjs.cloudflare.com/ajax/libs/'],
+  ['cdn.bootcdn.com/', 'https://cdnjs.cloudflare.com/ajax/libs/'],
+  ['cdn.staticfile.net/', 'https://cdnjs.cloudflare.com/ajax/libs/'],
+  ['cdn.staticfile.org/', 'https://cdnjs.cloudflare.com/ajax/libs/'],
   // Misc
   ['pics.javbus.com/', 'https://i0.wp.com/pics.javbus.com/'],
   ['googlefonts.wp-china-yes.net/', 'https://fonts.googleapis.com/'],
   ['googleajax.wp-china-yes.net/', 'https://ajax.googleapis.com/']
 ] as const;
 
-export const buildRedirectModule = task(import.meta.path, async (span) => {
-  const domains = Array.from(new Set(REDIRECT.map(([from]) => tldts.getHostname(from, { detectIp: false })))).filter(Boolean);
+const REDIRECT_FAKEWEBSITES = [
+  // Redirect Google
+  ['google.cn', 'https://www.google.com'],
+  // IGN China to IGN Global
+  ['ign.xn--fiqs8s', 'https://cn.ign.com/ccpref/us'],
+  // Fuck Makeding
+  ['abbyychina.com', 'https://www.abbyy.cn'],
+  ['bartender.cc', 'https://cn.seagullscientific.com'],
+  ['betterzip.net', 'https://macitbetter.com'],
+  ['beyondcompare.cc', 'https://www.scootersoftware.com'],
+  ['bingdianhuanyuan.cn', 'https://www.faronics.com'],
+  ['chemdraw.com.cn', 'https://revvitysignals.com/products/research/chemdraw'],
+  ['codesoftchina.com', 'https://www.teklynx.com'],
+  ['coreldrawchina.com', 'https://www.coreldraw.com'],
+  ['crossoverchina.com', 'https://www.codeweavers.com'],
+  ['easyrecoverychina.com', 'https://www.ontrack.com'],
+  ['ediuschina.com', 'https://www.grassvalley.com'],
+  ['flstudiochina.com', 'https://www.image-line.com/fl-studio'],
+  ['formysql.com', 'https://www.navicat.com.cn'],
+  ['guitarpro.cc', 'https://www.guitar-pro.com'],
+  ['huishenghuiying.com.cn', 'https://www.corel.com'],
+  ['iconworkshop.cn', 'https://www.axialis.com/iconworkshop'],
+  ['imindmap.cc', 'https://imindmap.com/zh-cn'],
+  ['jihehuaban.com.cn', 'https://sketch.io'],
+  ['keyshot.cc', 'https://www.keyshot.com'],
+  ['mathtype.cn', 'https://www.wiris.com/en/mathtype'],
+  ['mindmanager.cc', 'https://www.mindjet.com'],
+  ['mindmapper.cc', 'https://mindmapper.com'],
+  ['mycleanmymac.com', 'https://macpaw.com/cleanmymac'],
+  ['nicelabel.cc', 'https://www.nicelabel.com'],
+  ['ntfsformac.cc', 'https://www.tuxera.com/products/tuxera-ntfs-for-mac-cn'],
+  ['ntfsformac.cn', 'https://www.paragon-software.com/ufsdhome/zh/ntfs-mac'],
+  ['overturechina.com', 'https://sonicscores.com/overture'],
+  ['passwordrecovery.cn', 'https://cn.elcomsoft.com/aopr.html'],
+  ['pdfexpert.cc', 'https://pdfexpert.com/zh'],
+  ['ultraiso.net', 'https://cn.ezbsystems.com/ultraiso'],
+  ['vegaschina.cn', 'https://www.vegas.com'],
+  ['xmindchina.net', 'https://www.xmind.cn'],
+  ['xshellcn.com', 'https://www.netsarang.com/products/xsh_overview.html'],
+  ['yuanchengxiezuo.com', 'https://www.teamviewer.com/zhcn'],
+  ['zbrushcn.com', 'https://www.maxon.net/en/zbrush']
+] as const;
+
+export const buildRedirectModule = task(require.main === module, __filename)(async (span) => {
+  const domains = Array.from(new Set([
+    ...REDIRECT_MIRROR.map(([from]) => getHostname(from, { detectIp: false })),
+    ...REDIRECT_FAKEWEBSITES.flatMap(([from]) => [from, `www.${from}`])
+  ])).filter(isTruthy);
 
   return compareAndWriteFile(
     span,
@@ -84,15 +141,9 @@ export const buildRedirectModule = task(import.meta.path, async (span) => {
       `hostname = %APPEND% ${domains.join(', ')}`,
       '',
       '[URL Rewrite]',
-      ...REDIRECT.map(([from, to]) => {
-        const src = `^https?://${escapeRegExp(from)}(.*)`;
-        return `${src} ${to}$1 302`;
-      })
+      ...REDIRECT_MIRROR.map(([from, to]) => `^https?://${escapeRegExp(from)}(.*) ${to}$1`),
+      ...REDIRECT_FAKEWEBSITES.map(([from, to]) => `^https?://(www.)?${escapeRegExp(from)} ${to}`)
     ],
-    path.resolve(import.meta.dir, '../Modules/sukka_url_redirect.sgmodule')
+    path.resolve(__dirname, '../Modules/sukka_url_redirect.sgmodule')
   );
 });
-
-if (import.meta.main) {
-  buildRedirectModule();
-}

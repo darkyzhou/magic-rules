@@ -2,46 +2,30 @@ import { fetchRemoteTextByLine } from './lib/fetch-text-by-line';
 import { resolve as pathResolve } from 'path';
 import { compareAndWriteFile, withBannerArray } from './lib/create-file';
 import { processLineFromReadline } from './lib/process-line';
-import { traceAsync, traceSync } from './lib/trace-runner';
 import { task } from './trace';
 
 import { exclude } from 'fast-cidr-tools';
-import picocolors from 'picocolors';
 import { createMemoizedPromise } from './lib/memo-promise';
-
-// https://github.com/misakaio/chnroutes2/issues/25
-const EXCLUDE_CIDRS = [
-  '223.118.0.0/15',
-  '223.120.0.0/15'
-];
-
-const INCLUDE_CIDRS = [
-  '211.99.96.0/19' // wy.com.cn
-];
+import { CN_CIDR_NOT_INCLUDED_IN_CHNROUTE, NON_CN_CIDR_INCLUDED_IN_CHNROUTE } from './constants/cidr';
+import { appendArrayInPlace } from './lib/append-array-in-place';
 
 export const getChnCidrPromise = createMemoizedPromise(async () => {
-  const cidr = await traceAsync(
-    picocolors.gray('download chnroutes2'),
-    async () => processLineFromReadline(await fetchRemoteTextByLine('https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt')),
-    picocolors.gray
-  );
-  return traceSync(
-    picocolors.gray('processing chnroutes2'),
-    () => exclude([...cidr, ...INCLUDE_CIDRS], EXCLUDE_CIDRS, true),
-    picocolors.gray
-  );
+  const cidr4 = await processLineFromReadline(await fetchRemoteTextByLine('https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt'));
+  const cidr6 = await processLineFromReadline(await fetchRemoteTextByLine('https://gaoyifan.github.io/china-operator-ip/china6.txt'));
+
+  appendArrayInPlace(cidr4, CN_CIDR_NOT_INCLUDED_IN_CHNROUTE);
+  return [exclude(cidr4, NON_CN_CIDR_INCLUDED_IN_CHNROUTE, true), cidr6] as const;
 });
 
-export const buildChnCidr = task(import.meta.path, async (span) => {
-  const filteredCidr = await getChnCidrPromise();
+export const buildChnCidr = task(require.main === module, __filename)(async (span) => {
+  const [filteredCidr4, cidr6] = await span.traceChildAsync('download chnroutes2', getChnCidrPromise);
 
   // Can not use SHARED_DESCRIPTION here as different license
   const description = [
     'License: CC BY-SA 2.0',
     'Homepage: https://ruleset.skk.moe',
     'GitHub: https://github.com/SukkaW/Surge',
-    '',
-    'Data from https://misaka.io (misakaio @ GitHub)'
+    ''
   ];
 
   // Can not use createRuleset here, as Clash support advanced ipset syntax
@@ -50,25 +34,53 @@ export const buildChnCidr = task(import.meta.path, async (span) => {
       span,
       withBannerArray(
         'Sukka\'s Ruleset - Mainland China IPv4 CIDR',
-        description,
+        [
+          ...description,
+          'Data from https://misaka.io (misakaio @ GitHub)'
+        ],
         new Date(),
-        filteredCidr.map(i => `IP-CIDR,${i}`)
+        filteredCidr4.map(i => `IP-CIDR,${i}`)
       ),
-      pathResolve(import.meta.dir, '../List/ip/china_ip.conf')
+      pathResolve(__dirname, '../List/ip/china_ip.conf')
+    ),
+    compareAndWriteFile(
+      span,
+      withBannerArray(
+        'Sukka\'s Ruleset - Mainland China IPv6 CIDR',
+        [
+          ...description,
+          'Data from https://github.com/gaoyifan/china-operator-ip'
+        ],
+        new Date(),
+        cidr6.map(i => `IP-CIDR6,${i}`)
+      ),
+      pathResolve(__dirname, '../List/ip/china_ip_ipv6.conf')
     ),
     compareAndWriteFile(
       span,
       withBannerArray(
         'Sukka\'s Ruleset - Mainland China IPv4 CIDR',
-        description,
+        [
+          ...description,
+          'Data from https://misaka.io (misakaio @ GitHub)'
+        ],
         new Date(),
-        filteredCidr
+        filteredCidr4
       ),
-      pathResolve(import.meta.dir, '../Clash/ip/china_ip.txt')
+      pathResolve(__dirname, '../Clash/ip/china_ip.txt')
+    ),
+    compareAndWriteFile(
+      span,
+      withBannerArray(
+        'Sukka\'s Ruleset - Mainland China IPv6 CIDR',
+        [
+          ...description,
+          'Data from https://github.com/gaoyifan/china-operator-ip'
+        ],
+        new Date(),
+        cidr6
+      ),
+      pathResolve(__dirname, '../Clash/ip/china_ip_ipv6.txt')
     )
   ]);
 });
-
-if (import.meta.main) {
-  buildChnCidr();
-}

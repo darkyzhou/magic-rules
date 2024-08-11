@@ -1,68 +1,48 @@
-import type { BunFile } from 'bun';
+import fs from 'fs';
+import { Readable } from 'stream';
 import { fetchWithRetry, defaultRequestInit } from './fetch-retry';
+import type { FileHandle } from 'fs/promises';
 
-// import { TextLineStream } from './text-line-transform-stream';
-// import { PolyfillTextDecoderStream } from './text-decoder-stream';
+import { TextLineStream } from './text-line-transform-stream';
+import type { ReadableStream } from 'stream/web';
+import { TextDecoderStream } from 'stream/web';
 import { processLine } from './process-line';
-// function createTextLineStreamFromStreamSource(stream: ReadableStream<Uint8Array>) {
-//   return stream
-//     .pipeThrough(new PolyfillTextDecoderStream())
-//     .pipeThrough(new TextLineStream());
-// }
 
-const decoder = new TextDecoder('utf-8');
-async function *createTextLineAsyncGeneratorFromStreamSource(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  let buf = '';
-
-  for await (const chunk of stream) {
-    const chunkStr = decoder.decode(chunk).replaceAll('\r\n', '\n');
-    for (let i = 0, len = chunkStr.length; i < len; i++) {
-      const char = chunkStr[i];
-      if (char === '\n') {
-        yield buf;
-        buf = '';
-      } else {
-        buf += char;
-      }
-    }
-  }
-
-  if (buf) {
-    yield buf;
-  }
-}
-
-export function readFileByLine(file: string | URL | BunFile) {
+const getReadableStream = (file: string | FileHandle): ReadableStream => {
   if (typeof file === 'string') {
-    file = Bun.file(file);
-  } else if (!('writer' in file)) {
-    file = Bun.file(file);
+    return Readable.toWeb(fs.createReadStream(file/* , { encoding: 'utf-8' } */));
   }
+  return file.readableWebStream();
+};
+// TODO: use FileHandle.readLine()
+export const readFileByLine: ((file: string | FileHandle) => AsyncIterable<string>) = (file: string | FileHandle) => getReadableStream(file)
+  .pipeThrough(new TextDecoderStream())
+  .pipeThrough(new TextLineStream());
 
-  return createTextLineAsyncGeneratorFromStreamSource(file.stream());
-}
-
-export function createReadlineInterfaceFromResponse(this: void, resp: Response) {
+const ensureResponseBody = (resp: Response) => {
   if (!resp.body) {
     throw new Error('Failed to fetch remote text');
   }
   if (resp.bodyUsed) {
     throw new Error('Body has already been consumed.');
   }
-  return createTextLineAsyncGeneratorFromStreamSource(resp.body);
-}
+  return resp.body;
+};
+
+export const createReadlineInterfaceFromResponse: ((resp: Response) => AsyncIterable<string>) = (resp) => ensureResponseBody(resp)
+  .pipeThrough(new TextDecoderStream())
+  .pipeThrough(new TextLineStream());
 
 export function fetchRemoteTextByLine(url: string | URL) {
   return fetchWithRetry(url, defaultRequestInit).then(createReadlineInterfaceFromResponse);
 }
 
-export async function readFileIntoProcessedArray(file: string | URL | BunFile) {
-  if (typeof file === 'string') {
-    file = Bun.file(file);
-  } else if (!('writer' in file)) {
-    file = Bun.file(file);
+export async function readFileIntoProcessedArray(file: string | FileHandle) {
+  const results = [];
+  for await (const line of readFileByLine(file)) {
+    if (processLine(line)) {
+      results.push(line);
+    }
   }
-
-  const content = await file.text();
-  return content.split('\n').filter(processLine);
+  return results;
 }

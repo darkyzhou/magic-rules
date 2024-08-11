@@ -2,104 +2,132 @@
 import { fetchRemoteTextByLine } from './fetch-text-by-line';
 import { NetworkFilter } from '@cliqz/adblocker';
 import { processLine } from './process-line';
-import { getGorhillPublicSuffixPromise } from './get-gorhill-publicsuffix';
-import type { PublicSuffixList } from '@gorhill/publicsuffixlist';
+import tldts from 'tldts-experimental';
 
 import picocolors from 'picocolors';
 import { normalizeDomain } from './normalize-domain';
 import { fetchAssets } from './fetch-assets';
-import { deserializeSet, fsCache, serializeSet } from './cache-filesystem';
+import { deserializeArray, fsFetchCache, serializeArray, createCacheKey } from './cache-filesystem';
 import type { Span } from '../trace';
+import createKeywordFilter from './aho-corasick';
+import { looseTldtsOpt } from '../constants/loose-tldts-opt';
 
 const DEBUG_DOMAIN_TO_FIND: string | null = null; // example.com | null
 let foundDebugDomain = false;
+const temporaryBypass = typeof DEBUG_DOMAIN_TO_FIND === 'string';
 
-export function processDomainLists(span: Span, domainListsUrl: string, includeAllSubDomain = false, ttl: number | null = null) {
-  return span.traceChild(`process domainlist: ${domainListsUrl}`).traceAsyncFn(() => fsCache.apply(
-    domainListsUrl,
+const domainListLineCb = (l: string, set: string[], includeAllSubDomain: boolean, meta: string) => {
+  let line = processLine(l);
+  if (!line) return;
+  line = line.toLowerCase();
+
+  const domain = normalizeDomain(line);
+  if (!domain) return;
+  if (domain !== line) {
+    console.log(
+      picocolors.red('[process domain list]'),
+      picocolors.gray(`line: ${line}`),
+      picocolors.gray(`domain: ${domain}`),
+      picocolors.gray(meta)
+    );
+
+    return;
+  }
+
+  if (DEBUG_DOMAIN_TO_FIND && line.includes(DEBUG_DOMAIN_TO_FIND)) {
+    console.warn(picocolors.red(meta), '(black)', line.replaceAll(DEBUG_DOMAIN_TO_FIND, picocolors.bold(DEBUG_DOMAIN_TO_FIND)));
+    foundDebugDomain = true;
+  }
+
+  set.push(includeAllSubDomain ? `.${line}` : line);
+};
+
+const cacheKey = createCacheKey(__filename);
+
+export function processDomainLists(span: Span, domainListsUrl: string, mirrors: string[] | null, includeAllSubDomain = false, ttl: number | null = null) {
+  return span.traceChild(`process domainlist: ${domainListsUrl}`).traceAsyncFn((childSpan) => fsFetchCache.apply(
+    cacheKey(domainListsUrl),
     async () => {
-      const domainSets = new Set<string>();
-
-      for await (const line of await fetchRemoteTextByLine(domainListsUrl)) {
-        let domainToAdd = processLine(line);
-        if (!domainToAdd) continue;
-        domainToAdd = normalizeDomain(domainToAdd);
-        if (!domainToAdd) continue;
-
-        if (DEBUG_DOMAIN_TO_FIND && domainToAdd.includes(DEBUG_DOMAIN_TO_FIND)) {
-          console.warn(picocolors.red(domainListsUrl), '(black)', domainToAdd.replaceAll(DEBUG_DOMAIN_TO_FIND, picocolors.bold(DEBUG_DOMAIN_TO_FIND)));
-          foundDebugDomain = true;
-        }
-
-        domainSets.add(includeAllSubDomain ? `.${domainToAdd}` : domainToAdd);
-      }
-
-      return domainSets;
-    },
-    {
-      ttl,
-      temporaryBypass: DEBUG_DOMAIN_TO_FIND !== null,
-      serializer: serializeSet,
-      deserializer: deserializeSet
-    }
-  ));
-}
-export function processHosts(span: Span, hostsUrl: string, mirrors: string[] | null, includeAllSubDomain = false, ttl: number | null = null) {
-  return span.traceChild(`processhosts: ${hostsUrl}`).traceAsyncFn((childSpan) => fsCache.apply(
-    hostsUrl,
-    async () => {
-      const domainSets = new Set<string>();
-
-      const lineCb = (l: string) => {
-        const line = processLine(l);
-        if (!line) {
-          return;
-        }
-
-        const _domain = line.split(/\s/)[1]?.trim();
-        if (!_domain) {
-          return;
-        }
-        const domain = normalizeDomain(_domain);
-        if (!domain) {
-          return;
-        }
-        if (DEBUG_DOMAIN_TO_FIND && domain.includes(DEBUG_DOMAIN_TO_FIND)) {
-          console.warn(picocolors.red(hostsUrl), '(black)', domain.replaceAll(DEBUG_DOMAIN_TO_FIND, picocolors.bold(DEBUG_DOMAIN_TO_FIND)));
-          foundDebugDomain = true;
-        }
-
-        domainSets.add(includeAllSubDomain ? `.${domain}` : domain);
-      };
+      const domainSets: string[] = [];
 
       if (mirrors == null || mirrors.length === 0) {
-        for await (const l of await fetchRemoteTextByLine(hostsUrl)) {
-          lineCb(l);
+        for await (const l of await fetchRemoteTextByLine(domainListsUrl)) {
+          domainListLineCb(l, domainSets, includeAllSubDomain, domainListsUrl);
         }
       } else {
-        // Avoid event loop starvation, so we wait for a macrotask before we start fetching.
-        await Promise.resolve();
+        const filterRules = await childSpan
+          .traceChild('download domain list')
+          .traceAsyncFn(() => fetchAssets(domainListsUrl, mirrors).then(text => text.split('\n')));
 
-        const filterRules = await childSpan.traceChild('download hosts').traceAsyncFn(() => {
-          return fetchAssets(hostsUrl, mirrors).then(text => text.split('\n'));
-        });
-
-        childSpan.traceChild('parse hosts').traceSyncFn(() => {
+        childSpan.traceChild('parse domain list').traceSyncFn(() => {
           for (let i = 0, len = filterRules.length; i < len; i++) {
-            lineCb(filterRules[i]);
+            domainListLineCb(filterRules[i], domainSets, includeAllSubDomain, domainListsUrl);
           }
         });
       }
 
-      console.log(picocolors.gray('[process hosts]'), picocolors.gray(hostsUrl), picocolors.gray(domainSets.size));
+      return domainSets;
+    },
+    {
+      ttl,
+      temporaryBypass,
+      serializer: serializeArray,
+      deserializer: deserializeArray
+    }
+  ));
+}
+
+const hostsLineCb = (l: string, set: string[], includeAllSubDomain: boolean, meta: string) => {
+  const line = processLine(l);
+  if (!line) {
+    return;
+  }
+
+  const _domain = line.split(/\s/)[1]?.trim();
+  if (!_domain) {
+    return;
+  }
+  const domain = normalizeDomain(_domain);
+  if (!domain) {
+    return;
+  }
+  if (DEBUG_DOMAIN_TO_FIND && domain.includes(DEBUG_DOMAIN_TO_FIND)) {
+    console.warn(picocolors.red(meta), '(black)', domain.replaceAll(DEBUG_DOMAIN_TO_FIND, picocolors.bold(DEBUG_DOMAIN_TO_FIND)));
+    foundDebugDomain = true;
+  }
+
+  set.push(includeAllSubDomain ? `.${domain}` : domain);
+};
+
+export function processHosts(span: Span, hostsUrl: string, mirrors: string[] | null, includeAllSubDomain = false, ttl: number | null = null) {
+  return span.traceChild(`processhosts: ${hostsUrl}`).traceAsyncFn((childSpan) => fsFetchCache.apply(
+    cacheKey(hostsUrl),
+    async () => {
+      const domainSets: string[] = [];
+
+      if (mirrors == null || mirrors.length === 0) {
+        for await (const l of await fetchRemoteTextByLine(hostsUrl)) {
+          hostsLineCb(l, domainSets, includeAllSubDomain, hostsUrl);
+        }
+      } else {
+        const filterRules = await childSpan
+          .traceChild('download hosts')
+          .traceAsyncFn(() => fetchAssets(hostsUrl, mirrors).then(text => text.split('\n')));
+
+        childSpan.traceChild('parse hosts').traceSyncFn(() => {
+          for (let i = 0, len = filterRules.length; i < len; i++) {
+            hostsLineCb(filterRules[i], domainSets, includeAllSubDomain, hostsUrl);
+          }
+        });
+      }
 
       return domainSets;
     },
     {
       ttl,
-      temporaryBypass: DEBUG_DOMAIN_TO_FIND !== null,
-      serializer: serializeSet,
-      deserializer: deserializeSet
+      temporaryBypass,
+      serializer: serializeArray,
+      deserializer: deserializeArray
     }
   ));
 }
@@ -110,7 +138,8 @@ const enum ParseType {
   WhiteAbsolute = -1,
   BlackAbsolute = 1,
   BlackIncludeSubdomain = 2,
-  ErrorMessage = 10
+  ErrorMessage = 10,
+  Null = 1000
 }
 
 export async function processFilterRules(
@@ -119,30 +148,30 @@ export async function processFilterRules(
   fallbackUrls?: readonly string[] | undefined | null,
   ttl: number | null = null
 ): Promise<{ white: string[], black: string[], foundDebugDomain: boolean }> {
-  const [white, black, warningMessages] = await parentSpan.traceChild(`process filter rules: ${filterRulesUrl}`).traceAsyncFn((span) => fsCache.apply<Readonly<[
+  const [white, black, warningMessages] = await parentSpan.traceChild(`process filter rules: ${filterRulesUrl}`).traceAsyncFn((span) => fsFetchCache.apply<Readonly<[
     white: string[],
     black: string[],
     warningMessages: string[]
   ]>>(
-    filterRulesUrl,
+    cacheKey(filterRulesUrl),
     async () => {
       const whitelistDomainSets = new Set<string>();
       const blacklistDomainSets = new Set<string>();
 
       const warningMessages: string[] = [];
 
-      const gorhill = await getGorhillPublicSuffixPromise();
-
+      const MUTABLE_PARSE_LINE_RESULT: [string, ParseType] = ['', 1000];
       /**
-     * @param {string} line
-     */
+       * @param {string} line
+       */
       const lineCb = (line: string) => {
-        const result = parse(line, gorhill);
-        if (!result) {
+        const result = parse(line, MUTABLE_PARSE_LINE_RESULT);
+        const flag = result[1];
+
+        if (flag === ParseType.Null) {
           return;
         }
 
-        const flag = result[1];
         const hostname = result[0];
 
         if (DEBUG_DOMAIN_TO_FIND) {
@@ -187,16 +216,12 @@ export async function processFilterRules(
         }
       };
 
-      // TODO-SUKKA: add cache here
       if (!fallbackUrls || fallbackUrls.length === 0) {
         for await (const line of await fetchRemoteTextByLine(filterRulesUrl)) {
           // don't trim here
           lineCb(line);
         }
       } else {
-        // Avoid event loop starvation, so we wait for a macrotask before we start fetching.
-        await Promise.resolve();
-
         const filterRules = await span.traceChild('download adguard filter').traceAsyncFn(() => {
           return fetchAssets(filterRulesUrl, fallbackUrls).then(text => text.split('\n'));
         });
@@ -216,7 +241,7 @@ export async function processFilterRules(
     },
     {
       ttl,
-      temporaryBypass: DEBUG_DOMAIN_TO_FIND !== null,
+      temporaryBypass,
       serializer: JSON.stringify,
       deserializer: JSON.parse
     }
@@ -243,27 +268,40 @@ export async function processFilterRules(
   };
 }
 
-const R_KNOWN_NOT_NETWORK_FILTER_PATTERN = /[#%&=~]/;
-const R_KNOWN_NOT_NETWORK_FILTER_PATTERN_2 = /(\$popup|\$removeparam|\$popunder|\$cname)/;
+// const R_KNOWN_NOT_NETWORK_FILTER_PATTERN_2 = /(\$popup|\$removeparam|\$popunder|\$cname)/;
 // cname exceptional filter can not be parsed by NetworkFilter
 // Surge / Clash can't handle CNAME either, so we just ignore them
 
-function parse($line: string, gorhill: PublicSuffixList): null | [hostname: string, flag: ParseType] {
+const kwfilter = createKeywordFilter([
+  '!',
+  '?',
+  '*',
+  '[',
+  '(',
+  ']',
+  ')',
+  ',',
+  '#',
+  '%',
+  '&',
+  '=',
+  '~',
+  // special modifier
+  '$popup',
+  '$removeparam',
+  '$popunder',
+  '$cname'
+]);
+
+function parse($line: string, result: [string, ParseType]): [hostname: string, flag: ParseType] {
   if (
     // doesn't include
     !$line.includes('.') // rule with out dot can not be a domain
     // includes
-    || $line.includes('!')
-    || $line.includes('?')
-    || $line.includes('*')
-    || $line.includes('[')
-    || $line.includes('(')
-    || $line.includes(']')
-    || $line.includes(')')
-    || $line.includes(',')
-    || R_KNOWN_NOT_NETWORK_FILTER_PATTERN.test($line)
+    || kwfilter($line)
   ) {
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   const line = $line.trim();
@@ -271,7 +309,8 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
   /** @example line.length */
   const len = line.length;
   if (len === 0) {
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   const firstCharCode = line[0].charCodeAt(0);
@@ -283,17 +322,17 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
     || lastCharCode === 46 // 46 `.`, line.endsWith('.')
     || lastCharCode === 45 // 45 `-`, line.endsWith('-')
     || lastCharCode === 95 // 95 `_`, line.endsWith('_')
-    // special modifier
-    || R_KNOWN_NOT_NETWORK_FILTER_PATTERN_2.test(line)
     // || line.includes('$popup')
     // || line.includes('$removeparam')
     // || line.includes('$popunder')
   ) {
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   if ((line.includes('/') || line.includes(':')) && !line.includes('://')) {
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   const filter = NetworkFilter.parse(line);
@@ -311,7 +350,8 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
       || (!filter.fromAny() && !filter.fromDocument())
     ) {
       // not supported type
-      return null;
+      result[1] = ParseType.Null;
+      return result;
     }
 
     if (
@@ -321,7 +361,8 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
     ) {
       const hostname = normalizeDomain(filter.hostname);
       if (!hostname) {
-        return null;
+        result[1] = ParseType.Null;
+        return result;
       }
 
       //  |: filter.isHostnameAnchor(),
@@ -330,7 +371,9 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
       const isIncludeAllSubDomain = filter.isHostnameAnchor();
 
       if (filter.isException() || filter.isBadFilter()) {
-        return [hostname, isIncludeAllSubDomain ? ParseType.WhiteIncludeSubdomain : ParseType.WhiteAbsolute];
+        result[0] = hostname;
+        result[1] = isIncludeAllSubDomain ? ParseType.WhiteIncludeSubdomain : ParseType.WhiteAbsolute;
+        return result;
       }
 
       const _1p = filter.firstParty();
@@ -338,12 +381,16 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
 
       if (_1p) {
         if (_1p === _3p) {
-          return [hostname, isIncludeAllSubDomain ? ParseType.BlackIncludeSubdomain : ParseType.BlackAbsolute];
+          result[0] = hostname;
+          result[1] = isIncludeAllSubDomain ? ParseType.BlackIncludeSubdomain : ParseType.BlackAbsolute;
+          return result;
         }
-        return null;
+        result[1] = ParseType.Null;
+        return result;
       }
       if (_3p) {
-        return null;
+        result[1] = ParseType.Null;
+        return result;
       }
     }
   }
@@ -361,7 +408,8 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
    * `.1.1.1.l80.js^$third-party`
    */
   if (line.includes('$third-party') || line.includes('$frame')) {
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   /** @example line.endsWith('^') */
@@ -393,28 +441,41 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
     let sliceStart = 0;
     let sliceEnd: number | undefined;
 
-    if (line[2] === '|') { // line.startsWith('@@|')
-      sliceStart = 3;
-      whiteIncludeAllSubDomain = false;
+    switch (line[2]) {
+      case '|':
+        // line.startsWith('@@|')
+        sliceStart = 3;
+        whiteIncludeAllSubDomain = false;
 
-      if (line[3] === '|') { // line.startsWith('@@||')
-        sliceStart = 4;
+        if (line[3] === '|') { // line.startsWith('@@||')
+          sliceStart = 4;
+          whiteIncludeAllSubDomain = true;
+        }
+
+        break;
+
+      case '.': { // line.startsWith('@@.')
+        sliceStart = 3;
         whiteIncludeAllSubDomain = true;
+        break;
       }
-    } else if (line[2] === '.') { // line.startsWith('@@.')
-      sliceStart = 3;
-      whiteIncludeAllSubDomain = true;
-    } else if (
-      /**
-       * line.startsWith('@@://')
-       *
-       * `@@://googleadservices.com^|`
-       * `@@://www.googleadservices.com^|`
-       */
-      line[2] === ':' && line[3] === '/' && line[4] === '/'
-    ) {
-      whiteIncludeAllSubDomain = false;
-      sliceStart = 5;
+
+      case ':': {
+        /**
+         * line.startsWith('@@://')
+         *
+         * `@@://googleadservices.com^|`
+         * `@@://www.googleadservices.com^|`
+         */
+        if (line[3] === '/' && line[4] === '/') {
+          whiteIncludeAllSubDomain = false;
+          sliceStart = 5;
+        }
+        break;
+      }
+
+      default:
+        break;
     }
 
     if (lineEndsWithCaretOrCaretVerticalBar) {
@@ -435,22 +496,23 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
       const sliced = line.slice(sliceStart, sliceEnd);
       const domain = normalizeDomain(sliced);
       if (domain) {
-        return [domain, whiteIncludeAllSubDomain ? ParseType.WhiteIncludeSubdomain : ParseType.WhiteAbsolute];
+        result[0] = domain;
+        result[1] = whiteIncludeAllSubDomain ? ParseType.WhiteIncludeSubdomain : ParseType.WhiteAbsolute;
+        return result;
       }
-      return [
-        `[parse-filter E0001] (white) invalid domain: ${JSON.stringify({
-          line, sliced, sliceStart, sliceEnd
-        })}`,
-        ParseType.ErrorMessage
-      ];
+
+      result[0] = `[parse-filter E0001] (white) invalid domain: ${JSON.stringify({
+        line, sliced, sliceStart, sliceEnd, domain
+      })}`;
+      result[1] = ParseType.ErrorMessage;
+      return result;
     }
 
-    return [
-      `[parse-filter E0006] (white) failed to parse: ${JSON.stringify({
-        line, sliceStart, sliceEnd
-      })}`,
-      ParseType.ErrorMessage
-    ];
+    result[0] = `[parse-filter E0006] (white) failed to parse: ${JSON.stringify({
+      line, sliceStart, sliceEnd
+    })}`;
+    result[1] = ParseType.ErrorMessage;
+    return result;
   }
 
   if (
@@ -479,13 +541,14 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
 
     const domain = normalizeDomain(sliced);
     if (domain) {
-      return [domain, includeAllSubDomain ? ParseType.BlackIncludeSubdomain : ParseType.BlackAbsolute];
+      result[0] = domain;
+      result[1] = includeAllSubDomain ? ParseType.BlackIncludeSubdomain : ParseType.BlackAbsolute;
+      return result;
     }
 
-    return [
-      `[parse-filter E0002] (black) invalid domain: ${sliced}`,
-      ParseType.ErrorMessage
-    ];
+    result[0] = `[parse-filter E0002] (black) invalid domain: ${sliced}`;
+    result[1] = ParseType.ErrorMessage;
+    return result;
   }
 
   const lineStartsWithSingleDot = firstCharCode === 46; // 46 `.`
@@ -505,21 +568,23 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
         : (lineEndsWithCaretVerticalBar ? -2 : undefined) // replace('^|', '')
     );
 
-    const suffix = gorhill.getPublicSuffix(sliced);
-    if (!gorhill.suffixInPSL(suffix)) {
+    const suffix = tldts.getPublicSuffix(sliced, looseTldtsOpt);
+    if (!suffix) {
       // This exclude domain-like resource like `1.1.4.514.js`
-      return null;
+      result[1] = ParseType.Null;
+      return result;
     }
 
     const domain = normalizeDomain(sliced);
     if (domain) {
-      return [domain, ParseType.BlackIncludeSubdomain];
+      result[0] = domain;
+      result[1] = ParseType.BlackIncludeSubdomain;
+      return result;
     }
 
-    return [
-      `[paparse-filter E0003] (black) invalid domain: ${sliced}`,
-      ParseType.ErrorMessage
-    ];
+    result[0] = `[parse-filter E0003] (black) invalid domain: ${JSON.stringify({ sliced, domain })}`;
+    result[1] = ParseType.ErrorMessage;
+    return result;
   }
 
   /**
@@ -551,14 +616,16 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
       const sliced = line.slice(sliceStart, sliceEnd);
       const domain = normalizeDomain(sliced);
       if (domain) {
-        return [domain, ParseType.BlackIncludeSubdomain];
+        result[0] = domain;
+        result[1] = ParseType.BlackIncludeSubdomain;
+        return result;
       }
-      return [
-        `[parse-filter E0004] (black) invalid domain: ${JSON.stringify({
-          line, sliced, sliceStart, sliceEnd
-        })}`,
-        ParseType.ErrorMessage
-      ];
+
+      result[0] = `[parse-filter E0004] (black) invalid domain: ${JSON.stringify({
+        line, sliced, sliceStart, sliceEnd, domain
+      })}`;
+      result[1] = ParseType.ErrorMessage;
+      return result;
     }
   }
   /**
@@ -576,21 +643,23 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
   ) {
     const _domain = line.slice(0, -1);
 
-    const suffix = gorhill.getPublicSuffix(_domain);
-    if (!suffix || !gorhill.suffixInPSL(suffix)) {
+    const suffix = tldts.getPublicSuffix(_domain, looseTldtsOpt);
+    if (!suffix) {
       // This exclude domain-like resource like `_social_tracking.js^`
-      return null;
+      result[1] = ParseType.Null;
+      return result;
     }
 
     const domain = normalizeDomain(_domain);
     if (domain) {
-      return [domain, ParseType.BlackAbsolute];
+      result[0] = domain;
+      result[1] = ParseType.BlackAbsolute;
+      return result;
     }
 
-    return [
-      `[parse-filter E0005] (black) invalid domain: ${_domain}`,
-      ParseType.ErrorMessage
-    ];
+    result[0] = `[parse-filter E0005] (black) invalid domain: ${_domain}`;
+    result[1] = ParseType.ErrorMessage;
+    return result;
   }
 
   // Possibly that entire rule is domain
@@ -630,7 +699,7 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
     sliceEnd = -9;
   }
   const sliced = (sliceStart !== 0 || sliceEnd !== undefined) ? line.slice(sliceStart, sliceEnd) : line;
-  const suffix = gorhill.getPublicSuffix(sliced);
+  const suffix = tldts.getPublicSuffix(sliced, looseTldtsOpt);
   /**
    * Fast exclude definitely not domain-like resource
    *
@@ -639,19 +708,21 @@ function parse($line: string, gorhill: PublicSuffixList): null | [hostname: stri
    * `-cpm-ads.$badfilter`, suffix is `$badfilter`,
    * `portal.librus.pl$$advertisement-module`, suffix is `pl$$advertisement-module`
    */
-  if (!suffix || !gorhill.suffixInPSL(suffix)) {
+  if (!suffix) {
     // This exclude domain-like resource like `.gatracking.js`, `.beacon.min.js` and `.cookielaw.js`
-    return null;
+    result[1] = ParseType.Null;
+    return result;
   }
 
   const tryNormalizeDomain = normalizeDomain(sliced);
   if (tryNormalizeDomain === sliced) {
     // the entire rule is domain
-    return [sliced, ParseType.BlackIncludeSubdomain];
+    result[0] = sliced;
+    result[1] = ParseType.BlackIncludeSubdomain;
+    return result;
   }
 
-  return [
-    `[parse-filter E0010] can not parse: ${line}`,
-    ParseType.ErrorMessage
-  ];
+  result[0] = `[parse-filter ${tryNormalizeDomain === null ? 'E0010' : 'E0011'}] can not parse: ${JSON.stringify({ line, tryNormalizeDomain, sliced })}`;
+  result[1] = ParseType.ErrorMessage;
+  return result;
 }

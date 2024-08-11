@@ -13,7 +13,7 @@ import { Readable } from 'stream';
 const IS_READING_BUILD_OUTPUT = 1 << 2;
 const ALL_FILES_EXISTS = 1 << 3;
 
-export const downloadPreviousBuild = task(import.meta.path, async (span) => {
+export const downloadPreviousBuild = task(require.main === module, __filename)(async (span) => {
   const buildOutputList: string[] = [];
 
   let flag = 1 | ALL_FILES_EXISTS;
@@ -21,7 +21,7 @@ export const downloadPreviousBuild = task(import.meta.path, async (span) => {
   await span
     .traceChild('read .gitignore')
     .traceAsyncFn(async () => {
-      for await (const line of readFileByLine(path.resolve(import.meta.dir, '../.gitignore'))) {
+      for await (const line of readFileByLine(path.resolve(__dirname, '../.gitignore'))) {
         if (line === '# $ build output') {
           flag = flag | IS_READING_BUILD_OUTPUT;
           continue;
@@ -33,8 +33,7 @@ export const downloadPreviousBuild = task(import.meta.path, async (span) => {
         buildOutputList.push(line);
 
         if (!isCI) {
-          // Bun.file().exists() doesn't check directory
-          if (!existsSync(path.join(import.meta.dir, '..', line))) {
+          if (!existsSync(path.join(__dirname, '..', line))) {
             flag = flag & ~ALL_FILES_EXISTS;
           }
         }
@@ -61,10 +60,11 @@ export const downloadPreviousBuild = task(import.meta.path, async (span) => {
         throw new Error('Download previous build failed! No body found');
       }
 
-      const extract = tarStream.extract();
       const gunzip = zlib.createGunzip();
+      const extract = tarStream.extract();
+
       pipeline(
-        Readable.fromWeb(resp.body) as any,
+        Readable.fromWeb(resp.body),
         gunzip,
         extract
       );
@@ -83,17 +83,10 @@ export const downloadPreviousBuild = task(import.meta.path, async (span) => {
         }
 
         const relativeEntryPath = entry.header.name.replace(pathPrefix, '');
-        const targetPath = path.join(import.meta.dir, '..', relativeEntryPath);
+        const targetPath = path.join(__dirname, '..', relativeEntryPath);
 
         await mkdir(path.dirname(targetPath), { recursive: true });
-        await pipeline(
-          entry as any,
-          createWriteStream(targetPath)
-        );
+        await pipeline(entry, createWriteStream(targetPath));
       }
     });
 });
-
-if (import.meta.main) {
-  downloadPreviousBuild();
-}

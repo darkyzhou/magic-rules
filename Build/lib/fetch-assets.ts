@@ -1,5 +1,6 @@
 import picocolors from 'picocolors';
 import { defaultRequestInit, fetchWithRetry } from './fetch-retry';
+import { setTimeout } from 'timers/promises';
 
 class CustomAbortError extends Error {
   public readonly name = 'AbortError';
@@ -8,24 +9,14 @@ class CustomAbortError extends Error {
 
 const sleepWithAbort = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
   if (signal.aborted) {
-    reject(signal.reason);
+    reject(signal.reason as Error);
     return;
   }
 
-  signal.addEventListener('abort', stop);
-  Bun.sleep(ms).then(done).catch(doReject);
+  function stop(this: AbortSignal) { reject(this.reason as Error); }
 
-  function done() {
-    signal.removeEventListener('abort', stop);
-    resolve();
-  }
-  function stop(this: AbortSignal) {
-    reject(this.reason);
-  }
-  function doReject(reason: unknown) {
-    signal.removeEventListener('abort', stop);
-    reject(reason);
-  }
+  signal.addEventListener('abort', stop, { once: true });
+  setTimeout(ms, undefined, { ref: false }).then(resolve).catch(reject).finally(() => signal.removeEventListener('abort', stop));
 });
 
 export async function fetchAssets(url: string, fallbackUrls: string[] | readonly string[]) {

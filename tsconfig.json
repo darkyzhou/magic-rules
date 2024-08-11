@@ -1,18 +1,17 @@
 {
   "compilerOptions": {
-    "composite": true,
     "target": "esnext",
+    "lib": ["ESNext"],
     "moduleDetection": "force",
     "module": "esnext",
     "moduleResolution": "bundler",
-    "types": ["bun-types"],
     "allowImportingTsExtensions": true,
     "allowJs": true,
     "noEmit": true,
-    "downlevelIteration": true,
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
+    "strictNullChecks": true,
     "skipLibCheck": true
   },
   "include": [

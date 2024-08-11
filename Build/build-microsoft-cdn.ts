@@ -1,11 +1,12 @@
 import path from 'path';
-import { traceAsync } from './lib/trace-runner';
 import { task } from './trace';
 import { createRuleset } from './lib/create-file';
 import { fetchRemoteTextByLine } from './lib/fetch-text-by-line';
 import { createTrie } from './lib/trie';
 import { SHARED_DESCRIPTION } from './lib/constants';
 import { createMemoizedPromise } from './lib/memo-promise';
+import { extractDomainsFromFelixDnsmasq } from './lib/parse-dnsmasq';
+import { sortDomains } from './lib/stable-sort-domain';
 
 const PROBE_DOMAINS = ['.microsoft.com', '.windows.net', '.windows.com', '.windowsupdate.com', '.windowssearch.com', '.office.net'];
 
@@ -24,29 +25,26 @@ const BLACKLIST = [
 ];
 
 export const getMicrosoftCdnRulesetPromise = createMemoizedPromise(async () => {
-  const set = await traceAsync('fetch accelerated-domains.china.conf', async () => {
-    // First trie is to find the microsoft domains that matches probe domains
-    const trie = createTrie();
-    for await (const line of await fetchRemoteTextByLine('https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf')) {
-      if (line.startsWith('server=/') && line.endsWith('/114.114.114.114')) {
-        const domain = line.slice(8, -16);
-        trie.add(domain);
-      }
+  // First trie is to find the microsoft domains that matches probe domains
+  const trie = createTrie(null, true);
+  for await (const line of await fetchRemoteTextByLine('https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf')) {
+    const domain = extractDomainsFromFelixDnsmasq(line);
+    if (domain) {
+      trie.add(domain);
     }
-    return new Set(PROBE_DOMAINS.flatMap(domain => trie.find(domain, false)));
-  });
+  }
+  const foundMicrosoftCdnDomains = PROBE_DOMAINS.flatMap(domain => trie.find(domain));
 
   // Second trie is to remove blacklisted domains
-  const trie2 = createTrie(set);
-  const black = BLACKLIST.flatMap(domain => trie2.find(domain, true));
-  for (let i = 0, len = black.length; i < len; i++) {
-    set.delete(black[i]);
-  }
+  const trie2 = createTrie(foundMicrosoftCdnDomains, true, true);
+  BLACKLIST.forEach(trie2.whitelist);
 
-  return Array.from(set).map(d => `DOMAIN-SUFFIX,${d}`).concat(WHITELIST);
+  return sortDomains(trie2.dump())
+    .map(d => `DOMAIN-SUFFIX,${d}`)
+    .concat(WHITELIST);
 });
 
-export const buildMicrosoftCdn = task(import.meta.path, async (span) => {
+export const buildMicrosoftCdn = task(require.main === module, __filename)(async (span) => {
   const description = [
     ...SHARED_DESCRIPTION,
     '',
@@ -56,18 +54,16 @@ export const buildMicrosoftCdn = task(import.meta.path, async (span) => {
     ' - https://github.com/felixonmars/dnsmasq-china-list'
   ];
 
+  const res: string[] = await span.traceChildPromise('get microsoft cdn domains', getMicrosoftCdnRulesetPromise());
+
   return createRuleset(
     span,
     'Sukka\'s Ruleset - Microsoft CDN',
     description,
     new Date(),
-    await getMicrosoftCdnRulesetPromise(),
+    res,
     'ruleset',
-    path.resolve(import.meta.dir, '../List/non_ip/microsoft_cdn.conf'),
-    path.resolve(import.meta.dir, '../Clash/non_ip/microsoft_cdn.txt')
+    path.resolve(__dirname, '../List/non_ip/microsoft_cdn.conf'),
+    path.resolve(__dirname, '../Clash/non_ip/microsoft_cdn.txt')
   );
 });
-
-if (import.meta.main) {
-  buildMicrosoftCdn();
-}

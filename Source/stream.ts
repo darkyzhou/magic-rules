@@ -1,4 +1,4 @@
-interface StreamService {
+export interface StreamService {
   name: string,
   rules: string[],
   ip?: {
@@ -233,7 +233,13 @@ const ENCORE_TVB: StreamService = {
 
     'USER-AGENT,encoreTVB*',
 
-    'USER-AGENT,TVer-Release*',
+    'USER-AGENT,TVer-Release*'
+  ]
+};
+
+const ENCORE_TVB_JP_TVER: StreamService = {
+  name: 'encoreTVB JP',
+  rules: [
     'DOMAIN-SUFFIX,tver.jp'
   ]
 };
@@ -319,17 +325,23 @@ const HIMALAYA_FM: StreamService = {
 const HULU: StreamService = {
   name: 'Hulu',
   rules: [
-    'DOMAIN-SUFFIX,happyon.jp',
     'DOMAIN-SUFFIX,hulu.com',
-    'DOMAIN-SUFFIX,hulu.jp',
     'DOMAIN-SUFFIX,hulu.tv',
     'DOMAIN-SUFFIX,hulu.us',
     'DOMAIN-SUFFIX,huluim.com',
     'DOMAIN-SUFFIX,hulustream.com',
-    'DOMAIN-SUFFIX,hjholdings.jp',
 
     'USER-AGENT,Hulu*',
     'PROCESS-NAME,com.hulu.plus'
+  ]
+};
+
+const HULU_JP: StreamService = {
+  name: 'Hulu Japan',
+  rules: [
+    'DOMAIN-SUFFIX,happyon.jp',
+    'DOMAIN-SUFFIX,hjholdings.jp',
+    'DOMAIN-SUFFIX,hulu.jp'
   ]
 };
 
@@ -449,6 +461,7 @@ const MYTV_SUPER: StreamService = {
   rules: [
     'DOMAIN-SUFFIX,mytvsuper.com',
     'DOMAIN-SUFFIX,tvb.com',
+    'DOMAIN-SUFFIX,psg.cdn.hgc.com.hk',
 
     'USER-AGENT,mytv*',
 
@@ -659,15 +672,18 @@ const TIKTOK: StreamService = {
   rules: [
     'DOMAIN-SUFFIX,byteoversea.com',
     'DOMAIN-SUFFIX,ibytedtos.com',
-    'DOMAIN-SUFFIX,ibyteimg.com',
+    // 'DOMAIN-SUFFIX,ibyteimg.com', // We confirm that tiktokcdn DOES NOT have ANY geoblock
     'DOMAIN-SUFFIX,ipstatp.com',
     'DOMAIN-SUFFIX,isnssdk.com',
     'DOMAIN-SUFFIX,muscdn.com',
     'DOMAIN-SUFFIX,musical.ly',
     'DOMAIN-SUFFIX,tiktok.com',
+    'DOMAIN-SUFFIX,tiktok.us',
+    'DOMAIN-SUFFIX,tiktokv.us',
     'DOMAIN-SUFFIX,tik-tokapi.com',
-    'DOMAIN-SUFFIX,tiktokcdn.com',
+    // 'DOMAIN-SUFFIX,tiktokcdn.com', // We confirm that tiktokcdn DOES NOT have ANY geoblock
     'DOMAIN-SUFFIX,tiktokv.com',
+    'DOMAIN-SUFFIX,tiktokw.com',
     'DOMAIN-KEYWORD,-tiktokcdn-com',
 
     'USER-AGENT,TikTok*'
@@ -754,12 +770,13 @@ const WETV: StreamService = {
   ]
 };
 
-export const ALL = [
+export const ALL: StreamService[] = [
   $4GTV,
   ABEMA_TV, AMAZON_PRIME_VIDEO, ALL4, APPLE_TV, APPLE_MUSIC_TV,
   BAHAMUT, BBC, BILIBILI_INTL,
   DAZN, DEEZER, DISNEY_PLUS, DISCOVERY_PLUS, DMM,
   ENCORE_TVB,
+  ENCORE_TVB_JP_TVER,
   FOX_NOW, FOX_PLUS,
   HBO, HBO_ASIA, HIMALAYA_FM, HULU, HWTV,
   IQIYI_GLOBAL, ITV,
@@ -779,10 +796,11 @@ export const ALL = [
   SHOWTIME
 ];
 
-export const NORTH_AMERICA = [
+export const NORTH_AMERICA: StreamService[] = [
   FOX_NOW,
   FOX_PLUS,
   HULU, // Hulu US
+  HULU_JP,
   // HBO,
   // www.nfl.com
   // epix.com
@@ -817,7 +835,7 @@ export const NORTH_AMERICA = [
   // Crave
 ];
 
-export const EU = [
+export const EU: StreamService[] = [
   // RakutenTV
   // Funimation
   // SkyShowTime
@@ -846,7 +864,7 @@ export const EU = [
   // Amediateka
 ];
 
-export const HK = [
+export const HK: StreamService[] = [
   NOW_E,
   VIUTV,
   MYTV_SUPER,
@@ -854,7 +872,7 @@ export const HK = [
   BILIBILI_INTL
 ];
 
-export const TW = [
+export const TW: StreamService[] = [
   KKTV,
   LITV,
   // MyVideo
@@ -868,17 +886,17 @@ export const TW = [
   BILIBILI_INTL
 ];
 
-export const JP = [
+export const JP: StreamService[] = [
   DMM,
   // DMMTV
   ABEMA_TV,
-  NICONICO
+  NICONICO,
   // music.jp
   // Telasa
   // Paravi
   // unext
-  // HuluJP
-  // TVer
+  HULU_JP,
+  ENCORE_TVB_JP_TVER
   // GYAO!
   // wowow
   // VideoMarket

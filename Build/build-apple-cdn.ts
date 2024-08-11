@@ -5,10 +5,12 @@ import { parseFelixDnsmasq } from './lib/parse-dnsmasq';
 import { task } from './trace';
 import { SHARED_DESCRIPTION } from './lib/constants';
 import { createMemoizedPromise } from './lib/memo-promise';
-import { TTL, deserializeArray, fsCache, serializeArray } from './lib/cache-filesystem';
+import { TTL, deserializeArray, fsFetchCache, serializeArray, createCacheKey } from './lib/cache-filesystem';
 
-export const getAppleCdnDomainsPromise = createMemoizedPromise(() => fsCache.apply(
-  'https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/apple.china.conf',
+const cacheKey = createCacheKey(__filename);
+
+export const getAppleCdnDomainsPromise = createMemoizedPromise(() => fsFetchCache.apply(
+  cacheKey('https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/apple.china.conf'),
   () => parseFelixDnsmasq('https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/apple.china.conf'),
   {
     ttl: TTL.THREE_DAYS(),
@@ -17,8 +19,8 @@ export const getAppleCdnDomainsPromise = createMemoizedPromise(() => fsCache.app
   }
 ));
 
-export const buildAppleCdn = task(import.meta.path, async (span) => {
-  const res = await span.traceChild('get apple cdn domains').traceAsyncFn(getAppleCdnDomainsPromise);
+export const buildAppleCdn = task(require.main === module, __filename)(async (span) => {
+  const res: string[] = await span.traceChildPromise('get apple cdn domains', getAppleCdnDomainsPromise());
 
   const description = [
     ...SHARED_DESCRIPTION,
@@ -40,8 +42,8 @@ export const buildAppleCdn = task(import.meta.path, async (span) => {
       new Date(),
       ruleset,
       'ruleset',
-      path.resolve(import.meta.dir, '../List/non_ip/apple_cdn.conf'),
-      path.resolve(import.meta.dir, '../Clash/non_ip/apple_cdn.txt')
+      path.resolve(__dirname, '../List/non_ip/apple_cdn.conf'),
+      path.resolve(__dirname, '../Clash/non_ip/apple_cdn.txt')
     ),
     createRuleset(
       span,
@@ -50,12 +52,9 @@ export const buildAppleCdn = task(import.meta.path, async (span) => {
       new Date(),
       domainset,
       'domainset',
-      path.resolve(import.meta.dir, '../List/domainset/apple_cdn.conf'),
-      path.resolve(import.meta.dir, '../Clash/domainset/apple_cdn.txt')
+      path.resolve(__dirname, '../List/domainset/apple_cdn.conf'),
+      path.resolve(__dirname, '../Clash/domainset/apple_cdn.txt'),
+      path.resolve(__dirname, '../Clash/clash_mrs_domain/apple_cdn.mrs')
     )
   ]);
 });
-
-if (import.meta.main) {
-  buildAppleCdn();
-}

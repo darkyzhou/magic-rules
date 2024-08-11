@@ -9,7 +9,7 @@ import { ALL, NORTH_AMERICA, EU, HK, TW, JP, KR } from '../Source/stream';
 import { SHARED_DESCRIPTION } from './lib/constants';
 
 export const createRulesetForStreamService = (span: Span, fileId: string, title: string, streamServices: Array<import('../Source/stream').StreamService>) => {
-  return span.traceChild(fileId).traceAsyncFn(async (childSpan) => Promise.all([
+  return span.traceChildAsync(fileId, async (childSpan) => Promise.all([
     // Domains
     createRuleset(
       childSpan,
@@ -22,8 +22,8 @@ export const createRulesetForStreamService = (span: Span, fileId: string, title:
       new Date(),
       streamServices.flatMap((i) => i.rules),
       'ruleset',
-      path.resolve(import.meta.dir, `../List/non_ip/${fileId}.conf`),
-      path.resolve(import.meta.dir, `../Clash/non_ip/${fileId}.txt`)
+      path.resolve(__dirname, `../List/non_ip/${fileId}.conf`),
+      path.resolve(__dirname, `../Clash/non_ip/${fileId}.txt`)
     ),
     // IP
     createRuleset(
@@ -44,13 +44,13 @@ export const createRulesetForStreamService = (span: Span, fileId: string, title:
           : []
       )),
       'ruleset',
-      path.resolve(import.meta.dir, `../List/ip/${fileId}.conf`),
-      path.resolve(import.meta.dir, `../Clash/ip/${fileId}.txt`)
+      path.resolve(__dirname, `../List/ip/${fileId}.conf`),
+      path.resolve(__dirname, `../Clash/ip/${fileId}.txt`)
     )
   ]));
 };
 
-export const buildStreamService = task(import.meta.path, async (span) => {
+export const buildStreamService = task(require.main === module, __filename)(async (span) => {
   return Promise.all([
     createRulesetForStreamService(span, 'stream', 'All', ALL),
     createRulesetForStreamService(span, 'stream_us', 'North America', NORTH_AMERICA),
@@ -63,7 +63,3 @@ export const buildStreamService = task(import.meta.path, async (span) => {
     // createRulesetForStreamService('stream_south_east_asia', 'South East Asia', SOUTH_EAST_ASIA)
   ]);
 });
-
-if (import.meta.main) {
-  buildStreamService();
-}

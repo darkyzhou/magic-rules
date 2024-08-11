@@ -4,14 +4,11 @@ import { readFileByLine } from './fetch-text-by-line';
 import path from 'path';
 import fsp from 'fs/promises';
 
-const file = path.resolve(import.meta.dir, '../../Source/domainset/cdn.conf');
+const file = path.resolve(__dirname, '../../Source/domainset/cdn.conf');
 
 group('read file by line', () => {
-  bench('readline', () => processLineFromReadline(readFileByLine(file)));
-
+  bench('readFileByLine', () => processLineFromReadline(readFileByLine(file)));
   bench('fsp.readFile', () => fsp.readFile(file, 'utf-8').then((content) => content.split('\n').filter(processLine)));
-
-  bench('Bun.file', () => Bun.file(file).text().then((content) => content.split('\n').filter(processLine)));
 });
 
 run();

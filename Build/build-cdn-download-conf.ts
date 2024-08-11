@@ -4,10 +4,17 @@ import { readFileIntoProcessedArray } from './lib/fetch-text-by-line';
 import { createTrie } from './lib/trie';
 import { task } from './trace';
 import { SHARED_DESCRIPTION } from './lib/constants';
-import { getPublicSuffixListTextPromise } from './download-publicsuffixlist';
+import { getPublicSuffixListTextPromise } from './lib/download-publicsuffixlist';
+import { domainDeduper } from './lib/domain-deduper';
+import { appendArrayInPlace } from './lib/append-array-in-place';
+import { sortDomains } from './lib/stable-sort-domain';
 
-const getS3OSSDomainsPromise = (async (): Promise<Set<string>> => {
-  const trie = createTrie((await getPublicSuffixListTextPromise()).split('\n'));
+const getS3OSSDomainsPromise = (async (): Promise<string[]> => {
+  const trie = createTrie(
+    await getPublicSuffixListTextPromise(),
+    true,
+    false
+  );
 
   /**
    * Extract OSS domain from publicsuffix list
@@ -38,16 +45,25 @@ const getS3OSSDomainsPromise = (async (): Promise<Set<string>> => {
     }
   });
 
-  return S3OSSDomains;
+  return Array.from(S3OSSDomains);
 })();
 
-export const buildCdnDownloadConf = task(import.meta.path, async (span) => {
-  /** @type {string[]} */
-  const cdnDomainsList: string[] = await readFileIntoProcessedArray(path.resolve(import.meta.dir, '../Source/non_ip/cdn.conf'));
-  (await getS3OSSDomainsPromise).forEach((domain: string) => { cdnDomainsList.push(`DOMAIN-SUFFIX,${domain}`); });
+export const buildCdnDownloadConf = task(require.main === module, __filename)(async (span) => {
+  const [
+    S3OSSDomains,
 
-  const downloadDomainSet: string[] = await readFileIntoProcessedArray(path.resolve(import.meta.dir, '../Source/domainset/download.conf'));
-  const steamDomainSet: string[] = await readFileIntoProcessedArray(path.resolve(import.meta.dir, '../Source/domainset/steam.conf'));
+    cdnDomainsList,
+    downloadDomainSet,
+    steamDomainSet
+  ] = await Promise.all([
+    getS3OSSDomainsPromise,
+    readFileIntoProcessedArray(path.resolve(__dirname, '../Source/domainset/cdn.conf')),
+    readFileIntoProcessedArray(path.resolve(__dirname, '../Source/domainset/download.conf')),
+    readFileIntoProcessedArray(path.resolve(__dirname, '../Source/domainset/steam.conf'))
+  ]);
+
+  appendArrayInPlace(downloadDomainSet, S3OSSDomains.map(domain => `.${domain}`));
+  appendArrayInPlace(downloadDomainSet, steamDomainSet);
 
   return Promise.all([
     createRuleset(
@@ -59,10 +75,11 @@ export const buildCdnDownloadConf = task(import.meta.path, async (span) => {
         'This file contains object storage and static assets CDN domains.'
       ],
       new Date(),
-      cdnDomainsList,
-      'ruleset',
-      path.resolve(import.meta.dir, '../List/non_ip/cdn.conf'),
-      path.resolve(import.meta.dir, '../Clash/non_ip/cdn.txt')
+      sortDomains(domainDeduper(cdnDomainsList)),
+      'domainset',
+      path.resolve(__dirname, '../List/domainset/cdn.conf'),
+      path.resolve(__dirname, '../Clash/domainset/cdn.txt'),
+      path.resolve(__dirname, '../Clash/clash_mrs_domain/cdn.mrs')
     ),
     createRuleset(
       span,
@@ -73,17 +90,11 @@ export const buildCdnDownloadConf = task(import.meta.path, async (span) => {
         'This file contains domains for software updating & large file hosting.'
       ],
       new Date(),
-      [
-        ...downloadDomainSet,
-        ...steamDomainSet
-      ],
+      sortDomains(domainDeduper(downloadDomainSet)),
       'domainset',
-      path.resolve(import.meta.dir, '../List/domainset/download.conf'),
-      path.resolve(import.meta.dir, '../Clash/domainset/download.txt')
+      path.resolve(__dirname, '../List/domainset/download.conf'),
+      path.resolve(__dirname, '../Clash/domainset/download.txt'),
+      path.resolve(__dirname, '../Clash/clash_mrs_domain/download.mrs')
     )
   ]);
 });
-
-if (import.meta.main) {
-  buildCdnDownloadConf();
-}

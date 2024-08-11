@@ -1,48 +1,60 @@
-import type { PublicSuffixList } from '@gorhill/publicsuffixlist';
-import { createCachedGorhillGetDomain } from './cached-tld-parse';
+// tldts-experimental is way faster than tldts, but very little bit inaccurate
+// (since it is hashes based). But the result is still deterministic, which is
+// enough when sorting.
+import * as tldts from 'tldts-experimental';
+import { looseTldtsOpt } from '../constants/loose-tldts-opt';
 
-const compare = (a: string | null, b: string | null) => {
+export const compare = (a: string, b: string) => {
   if (a === b) return 0;
-  if (b == null) {
-    return 1;
-  }
-  if (a == null) {
-    return -1;
-  }
-
-  const aLen = a.length;
-  const r = aLen - b.length;
-  if (r > 0) {
-    return 1;
-  }
-  if (r < 0) {
-    return -1;
-  }
-
-  for (let i = 0; i < aLen; i++) {
-    if (b[i] == null) {
-      return 1;
-    }
-    if (a[i] < b[i]) {
-      return -1;
-    }
-    if (a[i] > b[i]) {
-      return 1;
-    }
-  }
-  return 0;
+  return (a.length - b.length) || a.localeCompare(b);
 };
 
-export const sortDomains = (inputs: string[], gorhill: PublicSuffixList) => {
-  const getDomain = createCachedGorhillGetDomain(gorhill);
-  const domains = inputs.reduce<Map<string, string>>((acc, cur) => {
-    if (!acc.has(cur)) acc.set(cur, getDomain(cur));
-    return acc;
-  }, new Map());
+export const buildParseDomainMap = (inputs: string[]) => {
+  const domainMap = new Map<string, string>();
+  const subdomainMap = new Map<string, string>();
+
+  for (let i = 0, len = inputs.length; i < len; i++) {
+    const cur = inputs[i];
+    if (!domainMap.has(cur)) {
+      const parsed = tldts.parse(cur, looseTldtsOpt);
+      domainMap.set(cur, parsed.domain ?? cur);
+      // if (!subdomainMap.has(cur)) {
+      subdomainMap.set(cur, parsed.subdomain ?? cur);
+    }
+  }
+
+  return { domainMap, subdomainMap };
+};
+
+export const sortDomains = (
+  inputs: string[],
+  domainMap?: Map<string, string>,
+  subdomainMap?: Map<string, string>
+) => {
+  if (!domainMap || !subdomainMap) {
+    const { domainMap: dm, subdomainMap: sm } = buildParseDomainMap(inputs);
+    domainMap = dm;
+    subdomainMap = sm;
+  }
 
   const sorter = (a: string, b: string) => {
     if (a === b) return 0;
-    return compare(domains.get(a)!, domains.get(b)!) || compare(a, b);
+
+    const main_domain_a = domainMap.get(a)!;
+    const main_domain_b = domainMap.get(b)!;
+
+    let t = compare(main_domain_a, main_domain_b)
+      || compare(
+        /** subdomain_a */ subdomainMap.get(a)!,
+        /** subdomain_b */ subdomainMap.get(b)!
+      );
+    if (t !== 0) return t;
+
+    if (a !== main_domain_a || b !== main_domain_b) {
+      t = compare(a, b);
+    }
+
+    return t;
   };
 
   return inputs.sort(sorter);
